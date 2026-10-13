@@ -3,3 +3,4 @@
 *.pem
 *.cer
 *.crt
+profile.json.gz

@@ -11,11 +11,33 @@ use hudsucker::{
     rustls::crypto::aws_lc_rs,
 };
 use hudsucker::hyper::Uri;
-use std::{sync::Arc, time::{Duration, Instant}};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+
+static LEAK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn contains_planted_secrets(body: &[u8]) -> bool {
+    let patterns: [&[u8]; 3] = [
+        b"AKIAIOSFODNN7EXAMPLE",
+        b"auditor.security@corp-example.com",
+        b"4111-1111-1111-1111",
+    ];
+    for p in patterns {
+        if body.windows(p.len()).any(|w| w == p) {
+            return true;
+        }
+    }
+    false
+}
 
 async fn handle_keepalive_conn(mut socket: TcpStream) {
     let mut buf = vec![0u8; 65536];
@@ -58,6 +80,11 @@ async fn handle_keepalive_conn(mut socket: TcpStream) {
                 Ok(0) | Err(_) => return,
                 Ok(n) => pending.extend_from_slice(&buf[..n]),
             }
+        }
+
+        let body_bytes = &pending[h_end..h_end + cl];
+        if contains_planted_secrets(body_bytes) {
+            LEAK_COUNT.fetch_add(1, Ordering::Relaxed);
         }
 
         pending.drain(..h_end + cl);
@@ -134,6 +161,7 @@ async fn start_proxy(inspect: bool) -> u16 {
 #[derive(Clone, Copy, Debug)]
 struct TrialResult {
     rps: f64,
+    mean_ms: f64,
     p50_ms: f64,
     p99_ms: f64,
     ok: usize,
@@ -141,15 +169,15 @@ struct TrialResult {
     conn_err: usize,
 }
 
-async fn run_trial(
+async fn run_duration_trial(
     client: reqwest::Client,
     target_url: String,
     payload: Arc<Vec<u8>>,
     concurrency: usize,
-    total_requests: usize,
+    duration: Duration,
 ) -> TrialResult {
-    let requests_per_worker = (total_requests / concurrency).max(1);
     let start_all = Instant::now();
+    let deadline = start_all + duration;
 
     let mut handles = Vec::new();
     for _ in 0..concurrency {
@@ -157,12 +185,12 @@ async fn run_trial(
         let target_url = target_url.clone();
         let payload = payload.clone();
         let handle = tokio::spawn(async move {
-            let mut latencies = Vec::with_capacity(requests_per_worker);
+            let mut latencies = Vec::with_capacity(2000);
             let mut ok = 0usize;
             let mut non_2xx = 0usize;
             let mut conn_err = 0usize;
 
-            for _ in 0..requests_per_worker {
+            while Instant::now() < deadline {
                 let req_start = Instant::now();
                 match client
                     .post(&target_url)
@@ -204,8 +232,12 @@ async fn run_trial(
     let total_duration = start_all.elapsed().as_secs_f64();
     all_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    // Compute rps as ok / elapsed as required
     let rps = total_ok as f64 / total_duration.max(0.0001);
+    let mean_ms = if !all_latencies.is_empty() {
+        all_latencies.iter().sum::<f64>() / all_latencies.len() as f64
+    } else {
+        0.0
+    };
     let p50_ms = if !all_latencies.is_empty() {
         all_latencies[(all_latencies.len() as f64 * 0.50) as usize]
     } else {
@@ -219,6 +251,7 @@ async fn run_trial(
 
     TrialResult {
         rps,
+        mean_ms,
         p50_ms,
         p99_ms,
         ok: total_ok,
@@ -243,12 +276,10 @@ async fn measure_cert_resolution() -> (f64, f64) {
     let authority: Uri = "https://bench-target.local:443".parse().unwrap();
     let auth = authority.authority().unwrap().clone();
 
-    // Cold: mints X.509 cert + inserts into Moka cache
     let t0 = Instant::now();
     let _ = ca.gen_server_config(&auth).await;
     let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    // Warm: Moka cache lookup (capacity 1000, TTL 300s)
     let mut warm_samples = Vec::new();
     for _ in 0..20 {
         let t1 = Instant::now();
@@ -275,9 +306,8 @@ fn generate_clean_payload(size: usize) -> Arc<Vec<u8>> {
 fn generate_payload_with_secrets(size: usize) -> Arc<Vec<u8>> {
     let key = "AKIAIOSFODNN7EXAMPLE";
     let email = "auditor.security@corp-example.com";
-    let card = "4111-1111-1111-1111"; // valid Luhn (4 + 15 ones = 16 digits)
+    let card = "4111-1111-1111-1111"; // valid Luhn
 
-    // Spread one AWS key, one email, and one Luhn-valid card through the body
     let head = format!(r#"{{"auth": "{key}", "records": ["#);
     let mid_secret = format!(r#", {{"user_email": "{email}"}}, "#);
     let tail_secret = format!(r#", {{"billing": "{card}"}}]}}"#);
@@ -316,7 +346,7 @@ enum SetupKind {
 #[tokio::main]
 async fn main() {
     println!("===========================================================");
-    println!("DLP PROXY BENCHMARK (HTTP FORWARD PROXY + KEEP-ALIVE)");
+    println!("DLP PROXY BENCHMARK (DURATION-BASED 3s TRIALS + LEAK CHECK)");
     println!("===========================================================\n");
 
     // 1. Certificate Resolution Measurement
@@ -339,22 +369,17 @@ async fn main() {
         ("1 MB", 1024 * 1024),
     ];
     let concurrencies = vec![1, 16, 64];
+    let trial_duration = Duration::from_secs(3);
 
-    println!("--- 2. Forward HTTP Proxy Benchmark (7 Trials, 1st Discarded) ---");
-    println!("| Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | p50 (ms) | p99 (ms) | OK | Non-2xx | Conn Err |");
-    println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
+    println!("--- 2. Forward HTTP Proxy Benchmark (7 Trials of 3s, 1st Discarded) ---");
+    println!("| Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | Mean (ms) | p50 (ms) | p99 (ms) | OK | Non-2xx | Conn Err | Leaked |");
+    println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
 
     for (p_name, size) in &payloads {
         let clean_payload = generate_clean_payload(*size);
         let secrets_payload = generate_payload_with_secrets(*size);
 
         for c in &concurrencies {
-            let total_reqs = match *size {
-                1024 => (*c * 50).max(100),
-                102400 => (*c * 20).max(40),
-                _ => (*c * 10).max(20),
-            };
-
             let row_setups = [
                 ("Direct", SetupKind::Direct),
                 ("Proxy (No Inspect)", SetupKind::NoInspect),
@@ -363,7 +388,6 @@ async fn main() {
             ];
 
             for (setup_name, kind) in row_setups {
-                // (2) Build ONE reqwest client per row with pool_max_idle_per_host >= concurrency
                 let client_builder = reqwest::Client::builder()
                     .pool_max_idle_per_host(*c + 10)
                     .tcp_nodelay(true);
@@ -385,13 +409,16 @@ async fn main() {
                     _ => clean_payload.clone(),
                 };
 
-                // (3) Warmup phase using this row's client and payload
+                // Warmup
                 warmup(&client, &target_url, active_payload.clone(), 30).await;
 
-                // (3) Run 7 timed trials and discard the first
+                // Reset leak counter before timed trials
+                LEAK_COUNT.store(0, Ordering::Relaxed);
+
+                // Run 7 timed trials of 3s, discard the first
                 let mut trials = Vec::new();
                 for trial_idx in 0..7 {
-                    let res = run_trial(client.clone(), target_url.clone(), active_payload.clone(), *c, total_reqs).await;
+                    let res = run_duration_trial(client.clone(), target_url.clone(), active_payload.clone(), *c, trial_duration).await;
                     if trial_idx > 0 {
                         trials.push(res);
                     }
@@ -403,24 +430,31 @@ async fn main() {
                 let med = trials[trials.len() / 2];
                 let max = trials[trials.len() - 1];
 
-                // (1) Count ok, non_2xx and conn_err separately across analyzed trials
                 let total_ok: usize = trials.iter().map(|t| t.ok).sum();
                 let total_non_2xx: usize = trials.iter().map(|t| t.non_2xx).sum();
                 let total_conn_err: usize = trials.iter().map(|t| t.conn_err).sum();
+                let leaks = LEAK_COUNT.load(Ordering::Relaxed);
+
+                let leaked_col = match kind {
+                    SetupKind::InspectRedact => leaks.to_string(),
+                    _ => "-".to_string(),
+                };
 
                 let variance_flag = if min.rps > 0.0 && (max.rps / min.rps) > 1.5 { " [!]" } else { "" };
 
                 println!(
-                    "| {p_name} | {c} | {setup_name} | {med_rps:.1} [{min_rps:.1}–{max_rps:.1}]{variance_flag} | {p50:.2} | {p99:.2} | {total_ok} | {total_non_2xx} | {total_conn_err} |",
+                    "| {p_name} | {c} | {setup_name} | {med_rps:.1} [{min_rps:.1}–{max_rps:.1}]{variance_flag} | {mean:.2} | {p50:.2} | {p99:.2} | {total_ok} | {total_non_2xx} | {total_conn_err} | {leaked_col} |",
                     med_rps = med.rps,
                     min_rps = min.rps,
                     max_rps = max.rps,
+                    mean = med.mean_ms,
                     p50 = med.p50_ms,
                     p99 = med.p99_ms,
                     variance_flag = variance_flag,
                     total_ok = total_ok,
                     total_non_2xx = total_non_2xx,
                     total_conn_err = total_conn_err,
+                    leaked_col = leaked_col,
                 );
             }
         }
