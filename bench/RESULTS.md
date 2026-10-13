@@ -2,7 +2,7 @@
 
 Generated: Oct 13, 2026  
 Environment: Apple M1 (8 cores: 4 performance + 4 efficiency, arm64), macOS, rustc 1.94.1  
-Commit: f439292  
+Commit: 9917f14
 
 ---
 
