@@ -1,0 +1,30 @@
+[policy]
+default = "inspect"
+max_body_bytes = 1048576
+on_error = "block"
+
+[[domain]]
+host = "ads.example.com"
+action = "block"
+
+[[rule]]
+id = "aws-access-key"
+pattern = 'AKIA[0-9A-Z]{16}'
+action = "block"
+
+[[rule]]
+id = "email"
+pattern = '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
+action = "redact"
+
+[[rule]]
+id = "card"
+pattern = '\b(?:\d[ -]?){13,19}\b'
+check = "luhn"
+action = "redact"
+
+[[rule]]
+id = "high-entropy-token"
+pattern = '[A-Za-z0-9_\-]{32,}'
+check = "entropy"
+action = "log"
