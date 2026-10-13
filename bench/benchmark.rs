@@ -19,18 +19,16 @@ use tokio::{
 
 async fn handle_keepalive_conn(mut socket: TcpStream) {
     let mut buf = vec![0u8; 65536];
-    let mut pending = Vec::new();
+    let mut pending = Vec::with_capacity(128 * 1024);
 
     loop {
         let mut header_end = None;
-        // Search pending buffer first
         if let Some(pos) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
             header_end = Some(pos + 4);
         } else {
-            // Read until header ends
             while header_end.is_none() {
                 match socket.read(&mut buf).await {
-                    Ok(0) | Err(_) => return, // EOF or close
+                    Ok(0) | Err(_) => return,
                     Ok(n) => {
                         pending.extend_from_slice(&buf[..n]);
                         if let Some(pos) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -55,7 +53,6 @@ async fn handle_keepalive_conn(mut socket: TcpStream) {
             })
             .unwrap_or(0);
 
-        // Read remaining body bytes
         while pending.len() < h_end + cl {
             match socket.read(&mut buf).await {
                 Ok(0) | Err(_) => return,
@@ -63,7 +60,6 @@ async fn handle_keepalive_conn(mut socket: TcpStream) {
             }
         }
 
-        // Drain the processed request from pending
         pending.drain(..h_end + cl);
 
         let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK";
@@ -96,7 +92,7 @@ async fn start_proxy(inspect: bool) -> u16 {
 
     let rules = if inspect {
         vec![
-            RuleEntry { id: "aws-access-key".into(), pattern: r"AKIA[0-9A-Z]{16}".into(), check: None, action: "block".into() },
+            RuleEntry { id: "aws-access-key".into(), pattern: r"AKIA[0-9A-Z]{16}".into(), check: None, action: "redact".into() },
             RuleEntry { id: "email".into(), pattern: r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}".into(), check: None, action: "redact".into() },
             RuleEntry { id: "card".into(), pattern: r"\b(?:\d[ -]?){13,19}\b".into(), check: Some("luhn".into()), action: "redact".into() },
             RuleEntry { id: "high-entropy-token".into(), pattern: r"[A-Za-z0-9_\-]{32,}".into(), check: Some("entropy".into()), action: "log".into() },
@@ -140,7 +136,9 @@ struct TrialResult {
     rps: f64,
     p50_ms: f64,
     p99_ms: f64,
-    errors: usize,
+    ok: usize,
+    non_2xx: usize,
+    conn_err: usize,
 }
 
 async fn run_trial(
@@ -160,7 +158,10 @@ async fn run_trial(
         let payload = payload.clone();
         let handle = tokio::spawn(async move {
             let mut latencies = Vec::with_capacity(requests_per_worker);
-            let mut err_count = 0;
+            let mut ok = 0usize;
+            let mut non_2xx = 0usize;
+            let mut conn_err = 0usize;
+
             for _ in 0..requests_per_worker {
                 let req_start = Instant::now();
                 match client
@@ -169,42 +170,66 @@ async fn run_trial(
                     .send()
                     .await
                 {
-                    Ok(res) if res.status().is_success() => {
-                        latencies.push(req_start.elapsed().as_secs_f64() * 1000.0);
+                    Ok(res) => {
+                        if res.status().is_success() {
+                            latencies.push(req_start.elapsed().as_secs_f64() * 1000.0);
+                            ok += 1;
+                        } else {
+                            non_2xx += 1;
+                        }
                     }
-                    _ => {
-                        err_count += 1;
+                    Err(_) => {
+                        conn_err += 1;
                     }
                 }
             }
-            (latencies, err_count)
+            (latencies, ok, non_2xx, conn_err)
         });
         handles.push(handle);
     }
 
     let mut all_latencies = Vec::new();
-    let mut total_errors = 0;
+    let mut total_ok = 0;
+    let mut total_non_2xx = 0;
+    let mut total_conn_err = 0;
+
     for h in handles {
-        if let Ok((mut lats, errs)) = h.await {
+        if let Ok((mut lats, ok, non_2xx, conn_err)) = h.await {
             all_latencies.append(&mut lats);
-            total_errors += errs;
+            total_ok += ok;
+            total_non_2xx += non_2xx;
+            total_conn_err += conn_err;
         }
     }
     let total_duration = start_all.elapsed().as_secs_f64();
     all_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let total_done = all_latencies.len();
-    let rps = total_done as f64 / total_duration.max(0.0001);
-    let p50_ms = if total_done > 0 { all_latencies[(total_done as f64 * 0.50) as usize] } else { 0.0 };
-    let p99_ms = if total_done > 0 { all_latencies[((total_done as f64 * 0.99) as usize).min(total_done - 1)] } else { 0.0 };
+    // Compute rps as ok / elapsed as required
+    let rps = total_ok as f64 / total_duration.max(0.0001);
+    let p50_ms = if !all_latencies.is_empty() {
+        all_latencies[(all_latencies.len() as f64 * 0.50) as usize]
+    } else {
+        0.0
+    };
+    let p99_ms = if !all_latencies.is_empty() {
+        all_latencies[((all_latencies.len() as f64 * 0.99) as usize).min(all_latencies.len() - 1)]
+    } else {
+        0.0
+    };
 
-    TrialResult { rps, p50_ms, p99_ms, errors: total_errors }
+    TrialResult {
+        rps,
+        p50_ms,
+        p99_ms,
+        ok: total_ok,
+        non_2xx: total_non_2xx,
+        conn_err: total_conn_err,
+    }
 }
 
-async fn warmup(client: &reqwest::Client, target_url: &str, count: usize) {
-    let dummy = b"{\"ping\":\"warmup\"}".to_vec();
+async fn warmup(client: &reqwest::Client, target_url: &str, payload: Arc<Vec<u8>>, count: usize) {
     for _ in 0..count {
-        let _ = client.post(target_url).body(dummy.clone()).send().await;
+        let _ = client.post(target_url).body(payload.as_slice().to_vec()).send().await;
     }
 }
 
@@ -236,19 +261,56 @@ async fn measure_cert_resolution() -> (f64, f64) {
     (cold_ms, warm_median_ms)
 }
 
-fn generate_realistic_json_payload(size: usize, include_secrets: bool) -> Arc<Vec<u8>> {
-    let base = if include_secrets {
-        r#"{"event": "purchase", "card": "4111-1111-1111-1111", "email": "customer@example.com", "msg": "order complete"}"#
-    } else {
-        r#"{"event": "heartbeat", "status": "nominal", "node": "worker-42", "msg": "all system checks passed successfully"}"#
-    };
-    let mut out = String::from("{\"items\": [");
-    while out.len() < size {
-        if out.len() > 12 { out.push_str(", "); }
-        out.push_str(base);
+fn generate_clean_payload(size: usize) -> Arc<Vec<u8>> {
+    let filler = r#"{"item": "catalog_product_id_882194", "status": "active"}"#;
+    let mut out = String::from(r#"{"records": ["#);
+    while out.len() + 2 < size {
+        if out.len() > 14 { out.push_str(", "); }
+        out.push_str(filler);
     }
     out.push_str("]}");
     Arc::new(out.into_bytes())
+}
+
+fn generate_payload_with_secrets(size: usize) -> Arc<Vec<u8>> {
+    let key = "AKIAIOSFODNN7EXAMPLE";
+    let email = "auditor.security@corp-example.com";
+    let card = "4111-1111-1111-1111"; // valid Luhn (4 + 15 ones = 16 digits)
+
+    // Spread one AWS key, one email, and one Luhn-valid card through the body
+    let head = format!(r#"{{"auth": "{key}", "records": ["#);
+    let mid_secret = format!(r#", {{"user_email": "{email}"}}, "#);
+    let tail_secret = format!(r#", {{"billing": "{card}"}}]}}"#);
+
+    let filler = r#"{"item": "catalog_product_id_882194", "status": "active"}"#;
+    let mut out = head;
+    let target_mid = size / 2;
+    let mut added_mid = false;
+
+    while out.len() + tail_secret.len() < size {
+        if !added_mid && out.len() >= target_mid {
+            out.push_str(&mid_secret);
+            added_mid = true;
+        } else {
+            if out.len() > 30 && !out.ends_with('[') && !out.ends_with(", ") {
+                out.push_str(", ");
+            }
+            out.push_str(filler);
+        }
+    }
+    if !added_mid {
+        out.push_str(&mid_secret);
+    }
+    out.push_str(&tail_secret);
+    Arc::new(out.into_bytes())
+}
+
+#[derive(Clone, Copy)]
+enum SetupKind {
+    Direct,
+    NoInspect,
+    InspectClean,
+    InspectRedact,
 }
 
 #[tokio::main]
@@ -271,24 +333,6 @@ async fn main() {
 
     let target_url = format!("http://127.0.0.1:{server_port}/api");
 
-    let direct_client = reqwest::Client::builder().tcp_nodelay(true).build().unwrap();
-    let no_inspect_client = reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_no_inspect_port}")).unwrap())
-        .tcp_nodelay(true)
-        .build()
-        .unwrap();
-    let inspect_client = reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_inspect_port}")).unwrap())
-        .tcp_nodelay(true)
-        .build()
-        .unwrap();
-
-    println!("Warming up connections...");
-    warmup(&direct_client, &target_url, 200).await;
-    warmup(&no_inspect_client, &target_url, 200).await;
-    warmup(&inspect_client, &target_url, 200).await;
-    println!("Warmup complete.\n");
-
     let payloads = vec![
         ("1 KB", 1024),
         ("100 KB", 100 * 1024),
@@ -297,51 +341,86 @@ async fn main() {
     let concurrencies = vec![1, 16, 64];
 
     println!("--- 2. Forward HTTP Proxy Benchmark (7 Trials, 1st Discarded) ---");
-    println!("| Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | p50 (ms) | p99 (ms) | Errors |");
-    println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
+    println!("| Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | p50 (ms) | p99 (ms) | OK | Non-2xx | Conn Err |");
+    println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
 
     for (p_name, size) in &payloads {
-        let payload = generate_realistic_json_payload(*size, false);
+        let clean_payload = generate_clean_payload(*size);
+        let secrets_payload = generate_payload_with_secrets(*size);
+
         for c in &concurrencies {
             let total_reqs = match *size {
-                1024 => (*c * 100).max(200),
-                102400 => (*c * 30).max(60),
+                1024 => (*c * 50).max(100),
+                102400 => (*c * 20).max(40),
                 _ => (*c * 10).max(20),
             };
 
-            let setups = [
-                ("Direct", direct_client.clone()),
-                ("Proxy (No Inspect)", no_inspect_client.clone()),
-                ("Proxy (Inspect On)", inspect_client.clone()),
+            let row_setups = [
+                ("Direct", SetupKind::Direct),
+                ("Proxy (No Inspect)", SetupKind::NoInspect),
+                ("Proxy (Inspect On - Clean)", SetupKind::InspectClean),
+                ("Proxy (Inspect On - Redact)", SetupKind::InspectRedact),
             ];
 
-            for (setup_name, client) in setups {
+            for (setup_name, kind) in row_setups {
+                // (2) Build ONE reqwest client per row with pool_max_idle_per_host >= concurrency
+                let client_builder = reqwest::Client::builder()
+                    .pool_max_idle_per_host(*c + 10)
+                    .tcp_nodelay(true);
+
+                let client = match kind {
+                    SetupKind::Direct => client_builder.build().unwrap(),
+                    SetupKind::NoInspect => client_builder
+                        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_no_inspect_port}")).unwrap())
+                        .build()
+                        .unwrap(),
+                    SetupKind::InspectClean | SetupKind::InspectRedact => client_builder
+                        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_inspect_port}")).unwrap())
+                        .build()
+                        .unwrap(),
+                };
+
+                let active_payload = match kind {
+                    SetupKind::InspectRedact => secrets_payload.clone(),
+                    _ => clean_payload.clone(),
+                };
+
+                // (3) Warmup phase using this row's client and payload
+                warmup(&client, &target_url, active_payload.clone(), 30).await;
+
+                // (3) Run 7 timed trials and discard the first
                 let mut trials = Vec::new();
-                // Run 7 trials, discard trial 0
                 for trial_idx in 0..7 {
-                    let res = run_trial(client.clone(), target_url.clone(), payload.clone(), *c, total_reqs).await;
+                    let res = run_trial(client.clone(), target_url.clone(), active_payload.clone(), *c, total_reqs).await;
                     if trial_idx > 0 {
                         trials.push(res);
                     }
                 }
 
+                // Sort by rps to pick median
                 trials.sort_by(|a, b| a.rps.partial_cmp(&b.rps).unwrap());
                 let min = trials[0];
                 let med = trials[trials.len() / 2];
                 let max = trials[trials.len() - 1];
-                let total_errs: usize = trials.iter().map(|t| t.errors).sum();
+
+                // (1) Count ok, non_2xx and conn_err separately across analyzed trials
+                let total_ok: usize = trials.iter().map(|t| t.ok).sum();
+                let total_non_2xx: usize = trials.iter().map(|t| t.non_2xx).sum();
+                let total_conn_err: usize = trials.iter().map(|t| t.conn_err).sum();
 
                 let variance_flag = if min.rps > 0.0 && (max.rps / min.rps) > 1.5 { " [!]" } else { "" };
 
                 println!(
-                    "| {p_name} | {c} | {setup_name} | {med_rps:.1} [{min_rps:.1}–{max_rps:.1}]{variance_flag} | {p50:.2} | {p99:.2} | {total_errs} |",
+                    "| {p_name} | {c} | {setup_name} | {med_rps:.1} [{min_rps:.1}–{max_rps:.1}]{variance_flag} | {p50:.2} | {p99:.2} | {total_ok} | {total_non_2xx} | {total_conn_err} |",
                     med_rps = med.rps,
                     min_rps = min.rps,
                     max_rps = max.rps,
                     p50 = med.p50_ms,
                     p99 = med.p99_ms,
                     variance_flag = variance_flag,
-                    total_errs = total_errs,
+                    total_ok = total_ok,
+                    total_non_2xx = total_non_2xx,
+                    total_conn_err = total_conn_err,
                 );
             }
         }
