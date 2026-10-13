@@ -25,3 +25,10 @@ path = "bench/evaluate.rs"
 [[example]]
 name = "benchmark"
 path = "bench/benchmark.rs"
+
+[[example]]
+name = "profile_redact"
+path = "bench/profile_redact.rs"
+
+[profile.release]
+debug = true
