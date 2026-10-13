@@ -1,6 +1,6 @@
 use dlp_proxy::{
     config::{DomainEntry, RuleEntry},
-    detect::Rule,
+    detect::{Rule, Scanner},
     handler::DlpHandler,
     policy::Policy,
 };
@@ -113,9 +113,10 @@ async fn test_proxy_end_to_end() {
     ];
     let policy = Policy::new("inspect", &domain_entries);
 
+    let scanner = Scanner::new(test_rules()).unwrap();
     let handler = DlpHandler {
         policy: Arc::new(policy),
-        rules: Arc::new(test_rules()),
+        scanner: Arc::new(scanner),
         max_body_bytes: 1024 * 1024,
         fail_closed: true,
     };

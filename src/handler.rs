@@ -1,5 +1,5 @@
 use crate::{
-    detect::{self, Action, Hit, Rule},
+    detect::{self, Action, Hit, Scanner},
     log::log_decision,
     policy::{DomainAction, Policy},
 };
@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct DlpHandler {
     pub policy: Arc<Policy>,
-    pub rules: Arc<Vec<Rule>>,
+    pub scanner: Arc<Scanner>,
     pub max_body_bytes: usize,
     pub fail_closed: bool,
 }
@@ -79,21 +79,21 @@ impl HttpHandler for DlpHandler {
             }
         };
 
-        let hits = detect::scan(&self.rules, text);
+        let hits = self.scanner.scan(text);
         if hits.is_empty() {
             log_decision(&host, &path, "allow", &[]);
             return Request::from_parts(parts, Body::from(collected)).into();
         }
 
-        let rule_ids: Vec<String> = hits.iter().map(|h| self.rules[h.rule].id.clone()).collect();
-        if hits.iter().any(|h| matches!(self.rules[h.rule].action, Action::Block)) {
+        let rule_ids: Vec<String> = hits.iter().map(|h| self.scanner.rules[h.rule].id.clone()).collect();
+        if hits.iter().any(|h| matches!(self.scanner.rules[h.rule].action, Action::Block)) {
             log_decision(&host, &path, "block", &rule_ids);
             return block_response();
         }
 
-        let has_redact = hits.iter().any(|h| matches!(self.rules[h.rule].action, Action::Redact));
+        let has_redact = hits.iter().any(|h| matches!(self.scanner.rules[h.rule].action, Action::Redact));
         if has_redact {
-            let redact_hits: Vec<Hit> = hits.into_iter().filter(|h| matches!(self.rules[h.rule].action, Action::Redact)).collect();
+            let redact_hits: Vec<Hit> = hits.into_iter().filter(|h| matches!(self.scanner.rules[h.rule].action, Action::Redact)).collect();
             let redacted_text = detect::redact(text, &redact_hits);
             let bytes = redacted_text.into_bytes();
             parts.headers.insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));

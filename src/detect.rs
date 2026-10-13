@@ -1,6 +1,5 @@
 use crate::config::RuleEntry;
-use regex::Regex;
-use std::collections::HashMap;
+use regex::{Regex, RegexSet};
 
 #[derive(Debug, Clone)]
 pub enum Check { None, Luhn, Entropy(f64) }
@@ -35,20 +34,36 @@ impl Rule {
     }
 }
 
-// ponytail: one regex pass per rule; upgrade: regex::RegexSet for a single pass
-pub fn scan(rules: &[Rule], text: &str) -> Vec<Hit> {
-    let mut hits = vec![];
-    for (i, r) in rules.iter().enumerate() {
-        for m in r.re.find_iter(text) {
-            let ok = match r.check {
-                Check::None => true,
-                Check::Luhn => luhn(m.as_str()),
-                Check::Entropy(min) => entropy(m.as_str()) >= min,
-            };
-            if ok { hits.push(Hit { rule: i, start: m.start(), end: m.end() }); }
-        }
+pub struct Scanner {
+    pub rules: Vec<Rule>,
+    pub set: RegexSet,
+}
+
+impl Scanner {
+    pub fn new(rules: Vec<Rule>) -> Result<Self, regex::Error> {
+        let patterns: Vec<&str> = rules.iter().map(|r| r.re.as_str()).collect();
+        let set = RegexSet::new(patterns)?;
+        Ok(Self { rules, set })
     }
-    hits
+
+    // ponytail: regex set pre-filters rules before exact position extraction
+    pub fn scan(&self, text: &str) -> Vec<Hit> {
+        let matches = self.set.matches(text);
+        if !matches.matched_any() { return vec![]; }
+        let mut hits = vec![];
+        for i in matches.into_iter() {
+            let r = &self.rules[i];
+            for m in r.re.find_iter(text) {
+                let ok = match r.check {
+                    Check::None => true,
+                    Check::Luhn => luhn(m.as_str()),
+                    Check::Entropy(min) => entropy(m.as_str()) >= min,
+                };
+                if ok { hits.push(Hit { rule: i, start: m.start(), end: m.end() }); }
+            }
+        }
+        hits
+    }
 }
 
 pub fn luhn(s: &str) -> bool {
@@ -62,10 +77,10 @@ pub fn luhn(s: &str) -> bool {
 
 pub fn entropy(s: &str) -> f64 {
     if s.is_empty() { return 0.0; }
-    let mut counts = HashMap::new();
-    for b in s.bytes() { *counts.entry(b).or_insert(0usize) += 1; }
+    let mut counts = [0usize; 256];
+    for &b in s.as_bytes() { counts[b as usize] += 1; }
     let n = s.len() as f64;
-    counts.values().map(|&c| { let p = c as f64 / n; -p * p.log2() }).sum()
+    counts.iter().filter(|&&c| c > 0).map(|&c| { let p = c as f64 / n; -p * p.log2() }).sum()
 }
 
 pub fn redact(text: &str, hits: &[Hit]) -> String {

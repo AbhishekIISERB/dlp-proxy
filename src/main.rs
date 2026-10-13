@@ -1,4 +1,9 @@
-use dlp_proxy::{config::load_config, detect::Rule, handler::DlpHandler, policy::Policy};
+use dlp_proxy::{
+    config::load_config,
+    detect::{Rule, Scanner},
+    handler::DlpHandler,
+    policy::Policy,
+};
 use hudsucker::{
     Proxy,
     certificate_authority::RcgenAuthority,
@@ -14,6 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = std::env::args().nth(1).unwrap_or_else(|| "rules.toml".into());
     let cfg = load_config(&config_path)?;
     let rules: Vec<Rule> = cfg.rule.iter().filter_map(|r| Rule::from_config(r).ok()).collect();
+    let scanner = Scanner::new(rules)?;
     let policy = Policy::new(&cfg.policy.default, &cfg.domain);
 
     let key_pem = std::fs::read_to_string("ca.key").expect("Failed to read ca.key");
@@ -24,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let handler = DlpHandler {
         policy: Arc::new(policy),
-        rules: Arc::new(rules),
+        scanner: Arc::new(scanner),
         max_body_bytes: cfg.policy.max_body_bytes,
         fail_closed: cfg.policy.on_error == "block",
     };

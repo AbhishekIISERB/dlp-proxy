@@ -1,15 +1,16 @@
 use dlp_proxy::{
     config::RuleEntry,
-    detect::Rule,
+    detect::{Rule, Scanner},
     handler::DlpHandler,
     policy::Policy,
 };
 use hudsucker::{
     Proxy,
-    certificate_authority::RcgenAuthority,
+    certificate_authority::{CertificateAuthority, RcgenAuthority},
     rcgen::{Issuer, KeyPair},
     rustls::crypto::aws_lc_rs,
 };
+use hudsucker::hyper::Uri;
 use std::{sync::Arc, time::{Duration, Instant}};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -58,7 +59,10 @@ async fn start_server() -> u16 {
                             Ok(b) => body.extend_from_slice(&chunk[..b]),
                         }
                     }
-                    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\nOK",
+                        2
+                    );
                     let _ = socket.write_all(resp.as_bytes()).await;
                 }
             });
@@ -91,9 +95,10 @@ async fn start_proxy(inspect: bool) -> u16 {
         vec![]
     };
 
+    let scanner = Scanner::new(rules).unwrap();
     let handler = DlpHandler {
         policy: Arc::new(policy),
-        rules: Arc::new(rules),
+        scanner: Arc::new(scanner),
         max_body_bytes: 2 * 1024 * 1024,
         fail_closed: true,
     };
@@ -117,6 +122,7 @@ async fn start_proxy(inspect: bool) -> u16 {
     port
 }
 
+#[derive(Clone, Copy)]
 struct RunResult {
     rps: f64,
     p50_ms: f64,
@@ -130,7 +136,7 @@ async fn run_benchmark(
     concurrency: usize,
     total_requests: usize,
 ) -> RunResult {
-    let requests_per_worker = total_requests / concurrency;
+    let requests_per_worker = (total_requests / concurrency).max(1);
     let start_all = Instant::now();
 
     let mut handles = Vec::new();
@@ -142,12 +148,16 @@ async fn run_benchmark(
             let mut latencies = Vec::with_capacity(requests_per_worker);
             for _ in 0..requests_per_worker {
                 let req_start = Instant::now();
-                let _ = client
+                if let Ok(res) = client
                     .post(&target_url)
                     .body(payload.as_slice().to_vec())
                     .send()
-                    .await;
-                latencies.push(req_start.elapsed().as_secs_f64() * 1000.0);
+                    .await
+                {
+                    if res.status().is_success() {
+                        latencies.push(req_start.elapsed().as_secs_f64() * 1000.0);
+                    }
+                }
             }
             latencies
         });
@@ -164,20 +174,62 @@ async fn run_benchmark(
     all_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     let total_done = all_latencies.len();
-    let rps = total_done as f64 / total_duration;
+    let rps = total_done as f64 / total_duration.max(0.0001);
     let p50_ms = if total_done > 0 { all_latencies[(total_done as f64 * 0.50) as usize] } else { 0.0 };
     let p99_ms = if total_done > 0 { all_latencies[((total_done as f64 * 0.99) as usize).min(total_done - 1)] } else { 0.0 };
 
     RunResult { rps, p50_ms, p99_ms }
 }
 
-fn median_result(mut runs: Vec<RunResult>) -> RunResult {
-    runs.sort_by(|a, b| a.rps.partial_cmp(&b.rps).unwrap());
-    runs.remove(runs.len() / 2)
+async fn warmup(client: &reqwest::Client, target_url: &str, count: usize) {
+    let dummy = vec![b'W'; 256];
+    for _ in 0..count {
+        let _ = client.post(target_url).body(dummy.clone()).send().await;
+    }
+}
+
+async fn measure_cert_cache() -> (f64, f64) {
+    let key_pem = std::fs::read_to_string("ca.key").expect("Read ca.key");
+    let cert_pem = std::fs::read_to_string("ca.pem").expect("Read ca.pem");
+    let key_pair = KeyPair::from_pem(&key_pem).unwrap();
+    let issuer = Issuer::from_ca_cert_pem(&cert_pem, key_pair).unwrap();
+    let ca = RcgenAuthority::new(issuer, 1000, aws_lc_rs::default_provider());
+
+    let authority: Uri = "https://example.com:443".parse().unwrap();
+    let auth = authority.authority().unwrap().clone();
+
+    // Cold request: generates new RSA/ECDSA key, mints X.509 cert, inserts into Moka cache
+    let t0 = Instant::now();
+    let _ = ca.gen_server_config(&auth).await;
+    let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    // Warm requests: Moka in-memory cache hit
+    let mut warm_samples = Vec::new();
+    for _ in 0..10 {
+        let t1 = Instant::now();
+        let _ = ca.gen_server_config(&auth).await;
+        warm_samples.push(t1.elapsed().as_secs_f64() * 1000.0);
+    }
+    warm_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let warm_median_ms = warm_samples[warm_samples.len() / 2];
+
+    (cold_ms, warm_median_ms)
 }
 
 #[tokio::main]
 async fn main() {
+    println!("===========================================================");
+    println!("DLP PROXY BENCHMARK SUITE (OPTIMIZED SCANNER + WARMUP)");
+    println!("===========================================================\n");
+
+    // 1. Certificate Authority Cache Benchmark (Cold vs Warm)
+    println!("--- 1. Certificate Authority Moka Cache Benchmark ---");
+    let (cold_ms, warm_ms) = measure_cert_cache().await;
+    println!("Cold Request (Dynamic Keygen + X.509 Minting): {:.2} ms", cold_ms);
+    println!("Warm Request (Moka Cache Hit, hudsucker v0.25.0): {:.4} ms", warm_ms);
+    println!("Cache Speedup: {:.1}x\n", cold_ms / warm_ms.max(0.0001));
+
+    // 2. HTTP Proxy & Scanning Benchmark
     let server_port = start_server().await;
     let proxy_no_inspect_port = start_proxy(false).await;
     let proxy_inspect_port = start_proxy(true).await;
@@ -194,6 +246,13 @@ async fn main() {
         .build()
         .unwrap();
 
+    // Warmup phase for all endpoints
+    println!("Warming up connection pools...");
+    warmup(&direct_client, &target_url, 100).await;
+    warmup(&no_inspect_client, &target_url, 100).await;
+    warmup(&inspect_client, &target_url, 100).await;
+    println!("Warmup complete.\n");
+
     let payloads = vec![
         ("1 KB", 1024),
         ("100 KB", 100 * 1024),
@@ -201,17 +260,17 @@ async fn main() {
     ];
     let concurrencies = vec![1, 16, 64];
 
-    println!("Starting benchmarks (3 trials each, reporting median)...");
-    println!("| Payload | Concurrency | Setup | Requests/sec | p50 Latency (ms) | p99 Latency (ms) |");
+    println!("--- 2. Forwarding & Inspection Throughput Matrix ---");
+    println!("| Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | p50 (ms) | p99 (ms) |");
     println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
 
     for (p_name, size) in &payloads {
-        let payload = Arc::new(vec![b'A'; *size]);
+        let payload = Arc::new(vec![b'X'; *size]);
         for c in &concurrencies {
             let total_reqs = match *size {
-                1024 => (*c * 20).max(40),
-                102400 => (*c * 10).max(20),
-                _ => (*c * 5).max(10),
+                1024 => (*c * 50).max(100),
+                102400 => (*c * 20).max(40),
+                _ => (*c * 10).max(20),
             };
 
             let setups = [
@@ -226,10 +285,16 @@ async fn main() {
                     let r = run_benchmark(client.clone(), target_url.clone(), payload.clone(), *c, total_reqs).await;
                     runs.push(r);
                 }
-                let med = median_result(runs);
+                runs.sort_by(|a, b| a.rps.partial_cmp(&b.rps).unwrap());
+                let min_rps = runs[0].rps;
+                let med = runs[1];
+                let max_rps = runs[2].rps;
+
                 println!(
-                    "| {p_name} | {c} | {setup_name} | {rps:.1} | {p50:.2} | {p99:.2} |",
-                    rps = med.rps,
+                    "| {p_name} | {c} | {setup_name} | {med_rps:.1} [{min_rps:.1}–{max_rps:.1}] | {p50:.2} | {p99:.2} |",
+                    med_rps = med.rps,
+                    min_rps = min_rps,
+                    max_rps = max_rps,
                     p50 = med.p50_ms,
                     p99 = med.p99_ms
                 );

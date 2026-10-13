@@ -1,6 +1,6 @@
 use dlp_proxy::{
     config::{DomainEntry, RuleEntry},
-    detect::{self, Rule},
+    detect::{self, Rule, Scanner},
     policy::{DomainAction, Policy},
 };
 
@@ -37,6 +37,7 @@ fn default_rules() -> Vec<Rule> {
 #[test]
 fn test_detector_table_driven() {
     let rules = default_rules();
+    let scanner = Scanner::new(rules).unwrap();
     let cases = vec![
         ("Clean text with nothing sensitive", vec![]),
         ("My key is AKIA1234567890ABCDEF here", vec!["aws-access-key"]),
@@ -50,8 +51,8 @@ fn test_detector_table_driven() {
     ];
 
     for (input, expected_rules) in cases {
-        let hits = detect::scan(&rules, input);
-        let matched: Vec<&str> = hits.iter().map(|h| rules[h.rule].id.as_str()).collect();
+        let hits = scanner.scan(input);
+        let matched: Vec<&str> = hits.iter().map(|h| scanner.rules[h.rule].id.as_str()).collect();
         assert_eq!(matched, expected_rules, "Failed for input: {input}");
     }
 }
@@ -76,8 +77,9 @@ fn test_entropy_calculation() {
 #[test]
 fn test_redaction_and_overlaps() {
     let rules = default_rules();
+    let scanner = Scanner::new(rules).unwrap();
     let input = "Card: 4111 1111 1111 1111, Email: user@example.com";
-    let hits = detect::scan(&rules, input);
+    let hits = scanner.scan(input);
     assert_eq!(hits.len(), 2);
     let redacted = detect::redact(input, &hits);
     assert_eq!(redacted, "Card: [REDACTED], Email: [REDACTED]");
