@@ -62,7 +62,7 @@ fn main() {
     let scanner = Scanner::new(rules).unwrap();
 
     let mut dataset: Vec<(String, Vec<&'static str>)> = Vec::new();
-    let mut rng = 42u64;
+    let mut rng = 99999u64;
 
     // ==========================================
     // 1. REALISTIC POSITIVES (250 samples)

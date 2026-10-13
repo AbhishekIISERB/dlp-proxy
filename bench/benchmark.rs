@@ -14,58 +14,71 @@ use hudsucker::hyper::Uri;
 use std::{sync::Arc, time::{Duration, Instant}};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
 };
+
+async fn handle_keepalive_conn(mut socket: TcpStream) {
+    let mut buf = vec![0u8; 65536];
+    let mut pending = Vec::new();
+
+    loop {
+        let mut header_end = None;
+        // Search pending buffer first
+        if let Some(pos) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end = Some(pos + 4);
+        } else {
+            // Read until header ends
+            while header_end.is_none() {
+                match socket.read(&mut buf).await {
+                    Ok(0) | Err(_) => return, // EOF or close
+                    Ok(n) => {
+                        pending.extend_from_slice(&buf[..n]);
+                        if let Some(pos) = pending.windows(4).position(|w| w == b"\r\n\r\n") {
+                            header_end = Some(pos + 4);
+                        }
+                    }
+                }
+            }
+        }
+
+        let h_end = header_end.unwrap();
+        let headers_str = String::from_utf8_lossy(&pending[..h_end]);
+        let cl: usize = headers_str
+            .lines()
+            .find_map(|l| {
+                let s = l.to_lowercase();
+                if s.starts_with("content-length:") {
+                    l.split(':').nth(1)?.trim().parse().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        // Read remaining body bytes
+        while pending.len() < h_end + cl {
+            match socket.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(n) => pending.extend_from_slice(&buf[..n]),
+            }
+        }
+
+        // Drain the processed request from pending
+        pending.drain(..h_end + cl);
+
+        let resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nOK";
+        if socket.write_all(resp.as_bytes()).await.is_err() {
+            return;
+        }
+    }
+}
 
 async fn start_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {
-        while let Ok((mut socket, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 16384];
-                let mut n = 0;
-                let mut header_end = None;
-                while n < buf.len() {
-                    match socket.read(&mut buf[n..]).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(b) => {
-                            n += b;
-                            if let Some(pos) = buf[..n].windows(4).position(|w| w == b"\r\n\r\n") {
-                                header_end = Some(pos + 4);
-                                break;
-                            }
-                        }
-                    }
-                }
-                if let Some(h_end) = header_end {
-                    let headers = String::from_utf8_lossy(&buf[..h_end]);
-                    let cl: usize = headers
-                        .lines()
-                        .find_map(|l| {
-                            let s = l.to_lowercase();
-                            if s.starts_with("content-length:") {
-                                l.split(':').nth(1)?.trim().parse().ok()
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(0);
-                    let mut body = buf[h_end..n].to_vec();
-                    while body.len() < cl {
-                        let mut chunk = vec![0u8; (cl - body.len()).min(65536)];
-                        match socket.read(&mut chunk).await {
-                            Ok(0) | Err(_) => break,
-                            Ok(b) => body.extend_from_slice(&chunk[..b]),
-                        }
-                    }
-                    let resp = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\nOK",
-                        2
-                    );
-                    let _ = socket.write_all(resp.as_bytes()).await;
-                }
-            });
+        while let Ok((socket, _)) = listener.accept().await {
+            tokio::spawn(handle_keepalive_conn(socket));
         }
     });
     port
@@ -99,7 +112,7 @@ async fn start_proxy(inspect: bool) -> u16 {
     let handler = DlpHandler {
         policy: Arc::new(policy),
         scanner: Arc::new(scanner),
-        max_body_bytes: 2 * 1024 * 1024,
+        max_body_bytes: 4 * 1024 * 1024,
         fail_closed: true,
     };
 
@@ -122,20 +135,21 @@ async fn start_proxy(inspect: bool) -> u16 {
     port
 }
 
-#[derive(Clone, Copy)]
-struct RunResult {
+#[derive(Clone, Copy, Debug)]
+struct TrialResult {
     rps: f64,
     p50_ms: f64,
     p99_ms: f64,
+    errors: usize,
 }
 
-async fn run_benchmark(
+async fn run_trial(
     client: reqwest::Client,
     target_url: String,
     payload: Arc<Vec<u8>>,
     concurrency: usize,
     total_requests: usize,
-) -> RunResult {
+) -> TrialResult {
     let requests_per_worker = (total_requests / concurrency).max(1);
     let start_all = Instant::now();
 
@@ -146,28 +160,34 @@ async fn run_benchmark(
         let payload = payload.clone();
         let handle = tokio::spawn(async move {
             let mut latencies = Vec::with_capacity(requests_per_worker);
+            let mut err_count = 0;
             for _ in 0..requests_per_worker {
                 let req_start = Instant::now();
-                if let Ok(res) = client
+                match client
                     .post(&target_url)
                     .body(payload.as_slice().to_vec())
                     .send()
                     .await
                 {
-                    if res.status().is_success() {
+                    Ok(res) if res.status().is_success() => {
                         latencies.push(req_start.elapsed().as_secs_f64() * 1000.0);
+                    }
+                    _ => {
+                        err_count += 1;
                     }
                 }
             }
-            latencies
+            (latencies, err_count)
         });
         handles.push(handle);
     }
 
     let mut all_latencies = Vec::new();
+    let mut total_errors = 0;
     for h in handles {
-        if let Ok(mut lats) = h.await {
+        if let Ok((mut lats, errs)) = h.await {
             all_latencies.append(&mut lats);
+            total_errors += errs;
         }
     }
     let total_duration = start_all.elapsed().as_secs_f64();
@@ -178,34 +198,34 @@ async fn run_benchmark(
     let p50_ms = if total_done > 0 { all_latencies[(total_done as f64 * 0.50) as usize] } else { 0.0 };
     let p99_ms = if total_done > 0 { all_latencies[((total_done as f64 * 0.99) as usize).min(total_done - 1)] } else { 0.0 };
 
-    RunResult { rps, p50_ms, p99_ms }
+    TrialResult { rps, p50_ms, p99_ms, errors: total_errors }
 }
 
 async fn warmup(client: &reqwest::Client, target_url: &str, count: usize) {
-    let dummy = vec![b'W'; 256];
+    let dummy = b"{\"ping\":\"warmup\"}".to_vec();
     for _ in 0..count {
         let _ = client.post(target_url).body(dummy.clone()).send().await;
     }
 }
 
-async fn measure_cert_cache() -> (f64, f64) {
+async fn measure_cert_resolution() -> (f64, f64) {
     let key_pem = std::fs::read_to_string("ca.key").expect("Read ca.key");
     let cert_pem = std::fs::read_to_string("ca.pem").expect("Read ca.pem");
     let key_pair = KeyPair::from_pem(&key_pem).unwrap();
     let issuer = Issuer::from_ca_cert_pem(&cert_pem, key_pair).unwrap();
     let ca = RcgenAuthority::new(issuer, 1000, aws_lc_rs::default_provider());
 
-    let authority: Uri = "https://example.com:443".parse().unwrap();
+    let authority: Uri = "https://bench-target.local:443".parse().unwrap();
     let auth = authority.authority().unwrap().clone();
 
-    // Cold request: generates new RSA/ECDSA key, mints X.509 cert, inserts into Moka cache
+    // Cold: mints X.509 cert + inserts into Moka cache
     let t0 = Instant::now();
     let _ = ca.gen_server_config(&auth).await;
     let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-    // Warm requests: Moka in-memory cache hit
+    // Warm: Moka cache lookup (capacity 1000, TTL 300s)
     let mut warm_samples = Vec::new();
-    for _ in 0..10 {
+    for _ in 0..20 {
         let t1 = Instant::now();
         let _ = ca.gen_server_config(&auth).await;
         warm_samples.push(t1.elapsed().as_secs_f64() * 1000.0);
@@ -216,41 +236,57 @@ async fn measure_cert_cache() -> (f64, f64) {
     (cold_ms, warm_median_ms)
 }
 
+fn generate_realistic_json_payload(size: usize, include_secrets: bool) -> Arc<Vec<u8>> {
+    let base = if include_secrets {
+        r#"{"event": "purchase", "card": "4111-1111-1111-1111", "email": "customer@example.com", "msg": "order complete"}"#
+    } else {
+        r#"{"event": "heartbeat", "status": "nominal", "node": "worker-42", "msg": "all system checks passed successfully"}"#
+    };
+    let mut out = String::from("{\"items\": [");
+    while out.len() < size {
+        if out.len() > 12 { out.push_str(", "); }
+        out.push_str(base);
+    }
+    out.push_str("]}");
+    Arc::new(out.into_bytes())
+}
+
 #[tokio::main]
 async fn main() {
     println!("===========================================================");
-    println!("DLP PROXY BENCHMARK SUITE (OPTIMIZED SCANNER + WARMUP)");
+    println!("DLP PROXY BENCHMARK (HTTP FORWARD PROXY + KEEP-ALIVE)");
     println!("===========================================================\n");
 
-    // 1. Certificate Authority Cache Benchmark (Cold vs Warm)
-    println!("--- 1. Certificate Authority Moka Cache Benchmark ---");
-    let (cold_ms, warm_ms) = measure_cert_cache().await;
-    println!("Cold Request (Dynamic Keygen + X.509 Minting): {:.2} ms", cold_ms);
-    println!("Warm Request (Moka Cache Hit, hudsucker v0.25.0): {:.4} ms", warm_ms);
-    println!("Cache Speedup: {:.1}x\n", cold_ms / warm_ms.max(0.0001));
+    // 1. Certificate Resolution Measurement
+    println!("--- 1. Certificate Resolution (Hudsucker RcgenAuthority + Moka Cache) ---");
+    let (cold_ms, warm_ms) = measure_cert_resolution().await;
+    println!("Cold Resolution (Keygen + X.509 Minting): {:.2} ms", cold_ms);
+    println!("Warm Resolution (Moka Cache Hit, 1000 capacity, 300s TTL): {:.4} ms ({:.1} µs)", warm_ms, warm_ms * 1000.0);
+    println!("Cache Speedup: {:.0}x\n", cold_ms / warm_ms.max(0.0001));
 
-    // 2. HTTP Proxy & Scanning Benchmark
+    // 2. Throughput & Latency Benchmarks
     let server_port = start_server().await;
     let proxy_no_inspect_port = start_proxy(false).await;
     let proxy_inspect_port = start_proxy(true).await;
 
     let target_url = format!("http://127.0.0.1:{server_port}/api");
 
-    let direct_client = reqwest::Client::builder().build().unwrap();
+    let direct_client = reqwest::Client::builder().tcp_nodelay(true).build().unwrap();
     let no_inspect_client = reqwest::Client::builder()
         .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_no_inspect_port}")).unwrap())
+        .tcp_nodelay(true)
         .build()
         .unwrap();
     let inspect_client = reqwest::Client::builder()
         .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_inspect_port}")).unwrap())
+        .tcp_nodelay(true)
         .build()
         .unwrap();
 
-    // Warmup phase for all endpoints
-    println!("Warming up connection pools...");
-    warmup(&direct_client, &target_url, 100).await;
-    warmup(&no_inspect_client, &target_url, 100).await;
-    warmup(&inspect_client, &target_url, 100).await;
+    println!("Warming up connections...");
+    warmup(&direct_client, &target_url, 200).await;
+    warmup(&no_inspect_client, &target_url, 200).await;
+    warmup(&inspect_client, &target_url, 200).await;
     println!("Warmup complete.\n");
 
     let payloads = vec![
@@ -260,16 +296,16 @@ async fn main() {
     ];
     let concurrencies = vec![1, 16, 64];
 
-    println!("--- 2. Forwarding & Inspection Throughput Matrix ---");
-    println!("| Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | p50 (ms) | p99 (ms) |");
-    println!("| :--- | :--- | :--- | :--- | :--- | :--- |");
+    println!("--- 2. Forward HTTP Proxy Benchmark (7 Trials, 1st Discarded) ---");
+    println!("| Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | p50 (ms) | p99 (ms) | Errors |");
+    println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
 
     for (p_name, size) in &payloads {
-        let payload = Arc::new(vec![b'X'; *size]);
+        let payload = generate_realistic_json_payload(*size, false);
         for c in &concurrencies {
             let total_reqs = match *size {
-                1024 => (*c * 50).max(100),
-                102400 => (*c * 20).max(40),
+                1024 => (*c * 100).max(200),
+                102400 => (*c * 30).max(60),
                 _ => (*c * 10).max(20),
             };
 
@@ -280,23 +316,32 @@ async fn main() {
             ];
 
             for (setup_name, client) in setups {
-                let mut runs = Vec::new();
-                for _ in 0..3 {
-                    let r = run_benchmark(client.clone(), target_url.clone(), payload.clone(), *c, total_reqs).await;
-                    runs.push(r);
+                let mut trials = Vec::new();
+                // Run 7 trials, discard trial 0
+                for trial_idx in 0..7 {
+                    let res = run_trial(client.clone(), target_url.clone(), payload.clone(), *c, total_reqs).await;
+                    if trial_idx > 0 {
+                        trials.push(res);
+                    }
                 }
-                runs.sort_by(|a, b| a.rps.partial_cmp(&b.rps).unwrap());
-                let min_rps = runs[0].rps;
-                let med = runs[1];
-                let max_rps = runs[2].rps;
+
+                trials.sort_by(|a, b| a.rps.partial_cmp(&b.rps).unwrap());
+                let min = trials[0];
+                let med = trials[trials.len() / 2];
+                let max = trials[trials.len() - 1];
+                let total_errs: usize = trials.iter().map(|t| t.errors).sum();
+
+                let variance_flag = if min.rps > 0.0 && (max.rps / min.rps) > 1.5 { " [!]" } else { "" };
 
                 println!(
-                    "| {p_name} | {c} | {setup_name} | {med_rps:.1} [{min_rps:.1}–{max_rps:.1}] | {p50:.2} | {p99:.2} |",
+                    "| {p_name} | {c} | {setup_name} | {med_rps:.1} [{min_rps:.1}–{max_rps:.1}]{variance_flag} | {p50:.2} | {p99:.2} | {total_errs} |",
                     med_rps = med.rps,
-                    min_rps = min_rps,
-                    max_rps = max_rps,
+                    min_rps = min.rps,
+                    max_rps = max.rps,
                     p50 = med.p50_ms,
-                    p99 = med.p99_ms
+                    p99 = med.p99_ms,
+                    variance_flag = variance_flag,
+                    total_errs = total_errs,
                 );
             }
         }

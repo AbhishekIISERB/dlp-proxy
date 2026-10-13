@@ -68,7 +68,7 @@ impl Scanner {
 
 pub fn luhn(s: &str) -> bool {
     let d: Vec<u32> = s.chars().filter_map(|c| c.to_digit(10)).collect();
-    if d.len() < 13 || d.len() > 19 { return false; }
+    if d.len() < 13 || d.len() > 19 || !matches!(d[0], 3..=6) { return false; }
     let sum: u32 = d.iter().rev().enumerate()
         .map(|(i, &x)| if i % 2 == 1 { let y = x * 2; if y > 9 { y - 9 } else { y } } else { x })
         .sum();
@@ -76,7 +76,7 @@ pub fn luhn(s: &str) -> bool {
 }
 
 pub fn entropy(s: &str) -> f64 {
-    if s.is_empty() { return 0.0; }
+    if s.is_empty() || s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') { return 0.0; }
     let mut counts = [0usize; 256];
     for &b in s.as_bytes() { counts[b as usize] += 1; }
     let n = s.len() as f64;

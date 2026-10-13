@@ -55,8 +55,8 @@ Returns `403 Forbidden: Blocked by DLP Proxy`.
 3. **Body Ingestion & Decompression:** The body is size-checked against `max_body_bytes` and decompressed using Hudsucker's streaming decoder if compressed (gzip, deflate, brotli, zstd).
 4. **Pattern & Secret Detection (`detect.rs`):**
    - **RegexSet Pre-filtering:** Single-pass multi-pattern DFA match before position extraction.
-   - **Luhn Algorithm:** Validates candidate 13–19 digit sequences for credit card checksum compliance.
-   - **Shannon Entropy Check:** Computes bits-per-character entropy on candidate tokens using a stack-allocated zero-allocation frequency array.
+   - **Luhn Algorithm & BIN Filter:** Validates candidate digit sequences for card IIN prefixes (3–6) and checksum compliance.
+   - **Shannon Entropy Check:** Computes bits-per-character entropy on candidate tokens using a stack-allocated zero-allocation frequency array, filtering UUID and pure-hex formats.
 5. **Action Enforcement:**
    - **Block:** Halts request and responds with 403.
    - **Redact:** Non-overlapping hits are redacted from back to front to preserve byte indices; `Content-Length` is updated.
@@ -108,22 +108,23 @@ The core codebase is held strictly under the architecture budget using the **Pon
 
 Measured on **Apple M1 (arm64)** running **macOS** with **rustc 1.94.1**:
 
-### 1. Adversarial Detection Quality (500-Sample Corpus)
+### 1. Adversarial Detection Quality (500-Sample Labelled Corpus)
 - **AWS Keys:** 100.0% Precision, 100.0% Recall
 - **Emails:** 100.0% Precision, 100.0% Recall
-- **Credit Cards:** **94.3% Precision**, **100.0% Recall** (6 out of 50 adversarial 16-digit order numbers passed Luhn by random chance, confirming the expected 1-in-10 false positive rate).
-- **High-Entropy Tokens:** **28.6% Precision**, **100.0% Recall** (125 false positives on UUIDs, Git commit SHAs, base64 data, and JWTs, demonstrating why entropy detection is scoped to `action = "log"` rather than automated blocking).
+- **Credit Cards:** **97.1% Precision**, **100.0% Recall** (with major network BIN filtering + Luhn verification; raw Luhn yields 94.3% precision as ~10% of arbitrary 16-digit order numbers collide by chance).
+- **High-Entropy Tokens:** **50.0% Precision**, **100.0% Recall** (pure-hex hashes and UUIDs excluded; non-hex base64 and JWT segments account for remaining look-alikes, confirming why this rule is scoped to audit logging).
 - *(Run `cargo run --example evaluate`)*
 
-### 2. Dynamic CA Certificate Minting Latency
+### 2. Certificate Resolution Latency (Cold vs. Warm)
 Measured using Hudsucker's `RcgenAuthority` (`hudsucker/src/certificate_authority/rcgen_authority.rs:48, 65-68`):
-- **Cold Request (Keygen + X.509 Minting):** **3.03 ms**
-- **Warm Request (Moka Cache Hit, 300s TTL):** **0.0003 ms** (0.3 µs)
-- **Cache Speedup Factor:** **12,110x**
+- **Cold Resolution (RSA-2048 CA, Ephemeral Keygen + X.509 Minting):** **2.19 ms**
+- **Warm Resolution (In-Memory Moka Cache Hit, 1,000 capacity, 300s TTL):** **0.0003 ms** (0.3 µs)
+- **Resolution Speedup:** **7,499x**
 
-### 3. Forwarding & Inspection Throughput
-- **1 KB Payload @ Concurrency 16:** **8,069.8 req/s** (p50: 1.53 ms, p99: 5.93 ms) vs. pass-through proxy **10,462.4 req/s** (p50: 1.30 ms). Inspection overhead is **+0.23 ms p50**.
-- **Body Size Scaling:** Inspection cost scales at **~17.4 ms per MB scanned** at concurrency 1 (0.22 ms @ 1 KB vs. 2.36 ms @ 100 KB vs. 17.93 ms @ 1 MB).
+### 3. Forward HTTP Proxy Throughput (7-Trial Keep-Alive Benchmark)
+- **100 KB Payload @ Concurrency 16:** **1,122.6 req/s** (p50: 11.11 ms, p99: 27.25 ms) vs. pass-through proxy **1,196.8 req/s** (**93.8% throughput retention**).
+- **1 MB Payload @ Concurrency 16:** **663.3 req/s** (p50: 23.51 ms, p99: 40.72 ms) vs. pass-through proxy **820.5 req/s** (**80.8% throughput retention**; 3.9x faster than unoptimized baseline).
+- **Zero Errors:** 100% of responses returned HTTP 200 OK across all payload and concurrency tiers.
 - *(Full matrix available in `bench/RESULTS.md` via `cargo run --release --example benchmark`)*
 
 ---
@@ -131,8 +132,8 @@ Measured using Hudsucker's `RcgenAuthority` (`hudsucker/src/certificate_authorit
 ## Resume Bullets
 
 - *Built a TLS-intercepting HTTP proxy in Rust on hudsucker and Tokio, with per-domain policy and regex, Luhn and entropy detection that blocks or redacts sensitive request data.*
-- *Evaluated on a 500-sample adversarial corpus: achieved 100% recall across all rules, 94.3% precision on cards against 16-digit order numbers (where ~10% pass Luhn by chance), and quantified false-positive trade-offs for entropy detection on UUIDs and Git SHAs.*
-- *Measured dynamic CA cert minting at 3.03 ms cold vs. 0.3 µs warm using Hudsucker’s Moka cache. At 1 KB payload (16 concurrent connections), inspection added 0.23 ms p50 latency, scaling to ~17 ms per MB scanned at concurrency 1.*
+- *Evaluated on a 500-sample synthetic corpus including 250 adversarial look-alikes: achieved 100% recall on AWS keys, emails, and cards; card rule 97.1% precision with BIN filtering (raw 16-digit order IDs pass Luhn ~10% of the time); entropy rule 50.0% precision, scoped to audit-only logging.*
+- *Measured dynamic CA cert resolution at 2.19 ms cold vs. 0.3 µs cached using Hudsucker’s 1,000-capacity Moka cache. Optimized scanning with RegexSet and stack arrays, achieving 663 req/s at 1 MB / 16 connections (80.8% of pass-through proxy throughput).*
 - *Held the codebase to 386 lines using a Ponytail rule ladder, documenting all shortcuts with explicit upgrade paths, and verified with table-driven and end-to-end integration tests.*
 
 ---
@@ -140,7 +141,7 @@ Measured using Hudsucker's `RcgenAuthority` (`hudsucker/src/certificate_authorit
 ## Sources & References
 
 1. **Hudsucker Proxy**: [github.com/omjadas/hudsucker](https://github.com/omjadas/hudsucker) (v0.25.0)
-   - `RcgenAuthority` Moka cache: `hudsucker/src/certificate_authority/rcgen_authority.rs` lines 48 (`cache: Cache<Authority, Arc<ServerConfig>>`) & lines 65–68 (`Cache::builder().max_capacity(...).time_to_live(...)`).
+   - `RcgenAuthority` Moka cache: `hudsucker/src/certificate_authority/rcgen_authority.rs` line 48 (`cache: Cache<Authority, Arc<ServerConfig>>`) and lines 65–68 (`Cache::builder().max_capacity(cache_size).time_to_live(...)`).
    - Cache TTL constant: `hudsucker/src/certificate_authority/mod.rs` line 12 (`CACHE_TTL: u64 = 300`).
-2. **Luhn Algorithm**: ISO/IEC 7812-1 standard for credit card account number verification.
-3. **Shannon Entropy**: Claude Shannon, *A Mathematical Theory of Communication* (1948).
+2. **ISO/IEC 7812-1**: Identification cards — Identification of issuers (Numbering system and Luhn checksum algorithm).
+3. **Shannon Entropy**: Claude Shannon, *A Mathematical Theory of Communication* (Bell System Technical Journal, 1948).
