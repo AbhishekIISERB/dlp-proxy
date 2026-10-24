@@ -31,10 +31,20 @@
 - **P4.3**: Structured audit logging records the triggered role name (`block:user`, `block:tool`, `redact:assistant`), never logging payload content.
 - **P4.4**: Created test suite in `tests/llm.rs` verifying OpenAI/Anthropic fixtures, tool-result injection blocking, user credit card DLP enforcement, and malformed JSON fallback.
 
+### Phase 5: Streaming Inspection (`stream.rs`)
+- **P5.1**: Implemented `src/stream.rs` (100 lines) with `StreamScanner`, sliding-window tail buffer (`MAX_MATCH_LEN = 256`), rolling size-cap enforcement, and multi-byte UTF-8 boundary handling.
+- **P5.2**: Created property test suite `tests/stream.rs` verifying rolling size cap abort, multi-byte UTF-8 split assembly, invalid UTF-8 fail-closed, and exhaustive byte-by-byte boundary split property tests across all 13 DLP and injection rules.
+- **P5.3**: Benchmarked streaming vs buffered inspection in `bench/stream_bench.rs` and documented results in `bench/STREAMING.md`: streaming reduces TTFB by 12.7x–60.4x (2.18 ms down to 36.1 µs on 1 MB payloads) while sustaining >430 MB/s scanning throughput.
+
 ---
 
 ## In Progress
-- Transitioning to **Phase 5: Streaming inspection (`stream.rs`)**.
+- **Phase 6: Evaluation Harness & Adversarial Validation**
+  - P6.1: Build `bench/corpus/injection/` JSONL datasets (dev split and test split, >= 300 attack + >= 300 benign samples).
+  - P6.2: Add conversion script for BIPIA / InjecAgent into standard JSONL schema.
+  - P6.3: Implement `examples/eval_injection.rs` calculating per-tier and overall precision, recall, F1, and FPR, writing Markdown tables to `bench/INJECTION_RESULTS.md`.
+  - P6.4: Build adaptive-attacker set (30+ evasion samples: paraphrase, Unicode tricks, base64, HTML split, non-English) and measure bypass rates on a held-out basis.
+  - P6.5: Inbound-scan throughput and latency benchmark at 100 KB and 1 MB vs pass-through.
 
 ---
 
@@ -49,3 +59,4 @@
 - **Backward Compatibility:** All existing `rules.toml` files and existing outbound tests must continue to pass unchanged. New config fields default to existing outbound-only behavior (`direction = "out"`, `trust = "trusted"`, `inbound_action = "log"`).
 - **Linear-Time Matching:** Only the `regex` crate DFA/NFA linear engines will be used for detection (no backtracking, ReDoS-safe).
 - **Ponytail Discipline:** Adhere to line budgets and record all shortcuts with upgrade paths in code and the README ledger.
+- **Streaming Forwarding Trade-off:** Inbound streaming inspection enables real-time forwarding under `inbound_action = "log"` (reducing TTFB to 9–36 µs); `block` and `sanitize` require hold-back buffering up to `size_cap` because dispatched HTTP bytes cannot be recalled or sanitized once sent.

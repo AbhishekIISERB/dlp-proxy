@@ -31,5 +31,9 @@ path = "bench/benchmark.rs"
 name = "profile_redact"
 path = "bench/profile_redact.rs"
 
+[[example]]
+name = "stream_bench"
+path = "bench/stream_bench.rs"
+
 [profile.release]
 debug = true
