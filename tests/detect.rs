@@ -103,10 +103,16 @@ fn test_policy_lookup() {
         DomainEntry {
             host: "ads.example.com".into(),
             action: "block".into(),
+            direction: "out".into(),
+            trust: "trusted".into(),
+            inbound_action: "log".into(),
         },
         DomainEntry {
             host: "safe.internal".into(),
             action: "allow".into(),
+            direction: "out".into(),
+            trust: "trusted".into(),
+            inbound_action: "log".into(),
         },
     ];
     let policy = Policy::new("inspect", &domains);
@@ -116,4 +122,167 @@ fn test_policy_lookup() {
     assert_eq!(policy.decide("ADS.EXAMPLE.COM"), DomainAction::Block);
     assert_eq!(policy.decide("safe.internal"), DomainAction::Allow);
     assert_eq!(policy.decide("other.example.com"), DomainAction::Inspect);
+}
+
+#[test]
+fn test_rules_toml_backward_compatibility() {
+    let cfg = dlp_proxy::config::load_config("rules.toml").expect("Failed to parse rules.toml");
+    assert_eq!(cfg.policy.default, "inspect");
+    assert_eq!(cfg.policy.direction, "out");
+    assert_eq!(cfg.policy.trust, "trusted");
+    assert_eq!(cfg.policy.inbound_action, "log");
+
+    let ads = cfg
+        .domain
+        .iter()
+        .find(|d| d.host == "ads.example.com")
+        .expect("ads.example.com found");
+    assert_eq!(ads.action, "block");
+    assert_eq!(ads.direction, "out");
+    assert_eq!(ads.trust, "trusted");
+    assert_eq!(ads.inbound_action, "log");
+}
+
+#[test]
+fn test_policy_inbound_fields_table_driven() {
+    use dlp_proxy::policy::{Direction, InboundAction, Trust};
+
+    let cases = vec![
+        (
+            "untrusted-web.com",
+            "inspect",
+            "both",
+            "untrusted",
+            "sanitize",
+            DomainAction::Inspect,
+            Direction::Both,
+            Trust::Untrusted,
+            InboundAction::Sanitize,
+        ),
+        (
+            "strict-sandbox.net",
+            "inspect",
+            "in",
+            "untrusted",
+            "block",
+            DomainAction::Inspect,
+            Direction::In,
+            Trust::Untrusted,
+            InboundAction::Block,
+        ),
+        (
+            "internal-api.corp",
+            "allow",
+            "out",
+            "trusted",
+            "log",
+            DomainAction::Allow,
+            Direction::Out,
+            Trust::Trusted,
+            InboundAction::Log,
+        ),
+        (
+            "legacy-default.org",
+            "inspect",
+            "out",
+            "trusted",
+            "log",
+            DomainAction::Inspect,
+            Direction::Out,
+            Trust::Trusted,
+            InboundAction::Log,
+        ),
+        (
+            "fallback-fields.xyz",
+            "unknown",
+            "unknown",
+            "unknown",
+            "unknown",
+            DomainAction::Inspect,
+            Direction::Out,
+            Trust::Trusted,
+            InboundAction::Log,
+        ),
+    ];
+
+    let entries: Vec<DomainEntry> = cases
+        .iter()
+        .map(|(host, act, dir, tr, in_act, _, _, _, _)| DomainEntry {
+            host: (*host).into(),
+            action: (*act).into(),
+            direction: (*dir).into(),
+            trust: (*tr).into(),
+            inbound_action: (*in_act).into(),
+        })
+        .collect();
+
+    let policy = Policy::new("inspect", &entries);
+
+    for (host, _, _, _, _, exp_act, exp_dir, exp_tr, exp_in_act) in cases {
+        let d = policy.decide(host);
+        assert_eq!(d.action, exp_act, "Action mismatch for {host}");
+        assert_eq!(d.direction, exp_dir, "Direction mismatch for {host}");
+        assert_eq!(d.trust, exp_tr, "Trust mismatch for {host}");
+        assert_eq!(
+            d.inbound_action, exp_in_act,
+            "InboundAction mismatch for {host}"
+        );
+    }
+
+    let unlisted = policy.decide("random-unlisted.com");
+    assert_eq!(unlisted.action, DomainAction::Inspect);
+    assert_eq!(unlisted.direction, Direction::Out);
+    assert_eq!(unlisted.trust, Trust::Trusted);
+    assert_eq!(unlisted.inbound_action, InboundAction::Log);
+}
+
+#[test]
+fn test_direction_predicates() {
+    use dlp_proxy::policy::Direction;
+    assert!(Direction::Out.inspects_outbound());
+    assert!(!Direction::Out.inspects_inbound());
+
+    assert!(!Direction::In.inspects_outbound());
+    assert!(Direction::In.inspects_inbound());
+
+    assert!(Direction::Both.inspects_outbound());
+    assert!(Direction::Both.inspects_inbound());
+}
+
+#[test]
+fn test_toml_deserialization_with_new_fields() {
+    let toml_str = r#"
+        [policy]
+        default = "inspect"
+        direction = "both"
+        trust = "untrusted"
+        inbound_action = "sanitize"
+
+        [[domain]]
+        host = "wiki.org"
+        action = "inspect"
+        direction = "both"
+        trust = "untrusted"
+        inbound_action = "sanitize"
+
+        [[domain]]
+        host = "plain.org"
+        action = "allow"
+    "#;
+
+    let cfg: dlp_proxy::config::Config = toml::from_str(toml_str).unwrap();
+    assert_eq!(cfg.policy.direction, "both");
+    assert_eq!(cfg.policy.trust, "untrusted");
+    assert_eq!(cfg.policy.inbound_action, "sanitize");
+
+    let wiki = cfg.domain.iter().find(|d| d.host == "wiki.org").unwrap();
+    assert_eq!(wiki.direction, "both");
+    assert_eq!(wiki.trust, "untrusted");
+    assert_eq!(wiki.inbound_action, "sanitize");
+
+    let plain = cfg.domain.iter().find(|d| d.host == "plain.org").unwrap();
+    assert_eq!(plain.action, "allow");
+    assert_eq!(plain.direction, "out");
+    assert_eq!(plain.trust, "trusted");
+    assert_eq!(plain.inbound_action, "log");
 }

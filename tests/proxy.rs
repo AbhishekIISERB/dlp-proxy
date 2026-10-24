@@ -111,10 +111,16 @@ async fn test_proxy_end_to_end() {
         DomainEntry {
             host: "ads.example.com".into(),
             action: "block".into(),
+            direction: "out".into(),
+            trust: "trusted".into(),
+            inbound_action: "log".into(),
         },
         DomainEntry {
             host: "safe.internal".into(),
             action: "allow".into(),
+            direction: "out".into(),
+            trust: "trusted".into(),
+            inbound_action: "log".into(),
         },
     ];
     let policy = Policy::new("inspect", &domain_entries);

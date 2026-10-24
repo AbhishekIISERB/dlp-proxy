@@ -18,6 +18,12 @@ pub struct PolicyConfig {
     pub max_body_bytes: usize,
     #[serde(default = "default_on_error")]
     pub on_error: String,
+    #[serde(default = "default_direction")]
+    pub direction: String,
+    #[serde(default = "default_trust")]
+    pub trust: String,
+    #[serde(default = "default_inbound_action")]
+    pub inbound_action: String,
 }
 
 fn default_inspect() -> String {
@@ -29,11 +35,26 @@ fn default_max_bytes() -> usize {
 fn default_on_error() -> String {
     "block".into()
 }
+fn default_direction() -> String {
+    "out".into()
+}
+fn default_trust() -> String {
+    "trusted".into()
+}
+fn default_inbound_action() -> String {
+    "log".into()
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DomainEntry {
     pub host: String,
     pub action: String,
+    #[serde(default = "default_direction")]
+    pub direction: String,
+    #[serde(default = "default_trust")]
+    pub trust: String,
+    #[serde(default = "default_inbound_action")]
+    pub inbound_action: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]

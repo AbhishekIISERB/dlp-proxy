@@ -39,7 +39,8 @@ impl HttpHandler for DlpHandler {
             .unwrap_or("/")
             .to_string();
 
-        match self.policy.decide(&host) {
+        let decision = self.policy.decide(&host);
+        match decision.action {
             DomainAction::Block => {
                 log_decision(&host, &path, "block", &[]);
                 return block_response();
