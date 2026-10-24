@@ -18,10 +18,17 @@
 - **P2.3**: Added table-driven tests in `tests/inject.rs` with 3 positive and 3 negative test cases per rule, including adversarial look-alikes and security discussions.
 - **P2.4**: Added log regression test in `tests/inject.rs` verifying matched tokens and injection text are never emitted in structured decision logs.
 
+### Phase 3: Wire Inbound Inspection into the Proxy
+- **P3.1**: Implemented `handle_response` in `src/handler.rs` honoring domain `direction`, `trust`, and `inbound_action`. Refactored shared body collection and size-cap checking with `collect_body_with_cap`.
+- **P3.2**: Enforced content-type gating for `text/*`, `application/json`, `application/xml`, and `application/xhtml+xml`, skipping unsupported binary types with explicit audit logging.
+- **P3.3**: Supported all inbound actions: `log` (pass through), `sanitize` (rewriting body with updated `Content-Length` and dropping stale `Content-Encoding`/`ETag`), and `block` (fail-closed 403 Forbidden).
+- **P3.4**: Extended `src/log.rs` with `direction` field (`"in"`/`"out"`), omitting the field on outbound logs for strict backward compatibility.
+- **P3.5**: Created integration tests in `tests/inbound_proxy.rs` verifying all three inbound actions against a local mock upstream, including gzip decompression, benign pass-through, and fail-closed oversized body protection.
+
 ---
 
 ## In Progress
-- Transitioning to **Phase 3: Wire inbound inspection into the proxy**.
+- Transitioning to **Phase 4: LLM-API awareness (`llm.rs`)**.
 
 ---
 
