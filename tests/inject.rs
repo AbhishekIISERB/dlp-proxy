@@ -371,6 +371,7 @@ fn test_log_never_contains_matched_text() {
         path,
         action,
         rules: &rule_ids,
+        direction: Some("in"),
     };
     let json_log = serde_json::to_string(&entry).unwrap();
     log_decision(host, path, action, &rule_ids);

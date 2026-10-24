@@ -414,6 +414,7 @@ dependencies = [
 name = "dlp-proxy"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "http-body-util",
  "hudsucker",
  "rcgen",

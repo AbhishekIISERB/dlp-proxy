@@ -17,6 +17,7 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["rustls-tls"] }
+flate2 = "1.0"
 
 [[example]]
 name = "evaluate"
