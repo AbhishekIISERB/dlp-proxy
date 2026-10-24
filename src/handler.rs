@@ -6,7 +6,10 @@ use crate::{
 use http_body_util::BodyExt;
 use hudsucker::{
     Body, HttpContext, HttpHandler, RequestOrResponse, decode_request,
-    hyper::{Request, Response, StatusCode, header::{CONTENT_LENGTH, HOST, HeaderValue}},
+    hyper::{
+        Request, Response, StatusCode,
+        header::{CONTENT_LENGTH, HOST, HeaderValue},
+    },
 };
 use std::sync::Arc;
 
@@ -19,14 +22,22 @@ pub struct DlpHandler {
 }
 
 impl HttpHandler for DlpHandler {
-    async fn handle_request(&mut self, _ctx: &HttpContext, req: Request<Body>) -> RequestOrResponse {
+    async fn handle_request(
+        &mut self,
+        _ctx: &HttpContext,
+        req: Request<Body>,
+    ) -> RequestOrResponse {
         let uri = req.uri();
         let host = uri
             .host()
             .or_else(|| req.headers().get(HOST).and_then(|v| v.to_str().ok()))
             .unwrap_or("")
             .to_string();
-        let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/").to_string();
+        let path = uri
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/")
+            .to_string();
 
         match self.policy.decide(&host) {
             DomainAction::Block => {
@@ -40,11 +51,15 @@ impl HttpHandler for DlpHandler {
             DomainAction::Inspect => {}
         }
 
-        if let Some(cl) = req.headers().get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok()) {
-            if cl > self.max_body_bytes {
-                log_decision(&host, &path, "block:size_cap_exceeded", &[]);
-                return block_response();
-            }
+        if let Some(cl) = req
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+            && cl > self.max_body_bytes
+        {
+            log_decision(&host, &path, "block:size_cap_exceeded", &[]);
+            return block_response();
         }
 
         let req = match decode_request(req) {
@@ -85,18 +100,31 @@ impl HttpHandler for DlpHandler {
             return Request::from_parts(parts, Body::from(collected)).into();
         }
 
-        let rule_ids: Vec<String> = hits.iter().map(|h| self.scanner.rules[h.rule].id.clone()).collect();
-        if hits.iter().any(|h| matches!(self.scanner.rules[h.rule].action, Action::Block)) {
+        let rule_ids: Vec<String> = hits
+            .iter()
+            .map(|h| self.scanner.rules[h.rule].id.clone())
+            .collect();
+        if hits
+            .iter()
+            .any(|h| matches!(self.scanner.rules[h.rule].action, Action::Block))
+        {
             log_decision(&host, &path, "block", &rule_ids);
             return block_response();
         }
 
-        let has_redact = hits.iter().any(|h| matches!(self.scanner.rules[h.rule].action, Action::Redact));
+        let has_redact = hits
+            .iter()
+            .any(|h| matches!(self.scanner.rules[h.rule].action, Action::Redact));
         if has_redact {
-            let redact_hits: Vec<Hit> = hits.into_iter().filter(|h| matches!(self.scanner.rules[h.rule].action, Action::Redact)).collect();
+            let redact_hits: Vec<Hit> = hits
+                .into_iter()
+                .filter(|h| matches!(self.scanner.rules[h.rule].action, Action::Redact))
+                .collect();
             let redacted_text = detect::redact(text, &redact_hits);
             let bytes = redacted_text.into_bytes();
-            parts.headers.insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
+            parts
+                .headers
+                .insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
             log_decision(&host, &path, "redact", &rule_ids);
             return Request::from_parts(parts, Body::from(bytes)).into();
         }

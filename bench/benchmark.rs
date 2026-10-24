@@ -4,13 +4,13 @@ use dlp_proxy::{
     handler::DlpHandler,
     policy::Policy,
 };
+use hudsucker::hyper::Uri;
 use hudsucker::{
     Proxy,
     certificate_authority::{CertificateAuthority, RcgenAuthority},
     rcgen::{Issuer, KeyPair},
     rustls::crypto::aws_lc_rs,
 };
-use hudsucker::hyper::Uri;
 use std::{
     sync::{
         Arc,
@@ -118,11 +118,31 @@ async fn start_proxy(inspect: bool) -> u16 {
     let policy = Policy::new(policy_default, &[]);
 
     let rules = if inspect {
-        vec![
-            RuleEntry { id: "aws-access-key".into(), pattern: r"AKIA[0-9A-Z]{16}".into(), check: None, action: "redact".into() },
-            RuleEntry { id: "email".into(), pattern: r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}".into(), check: None, action: "redact".into() },
-            RuleEntry { id: "card".into(), pattern: r"\b(?:\d[ -]?){13,19}\b".into(), check: Some("luhn".into()), action: "redact".into() },
-            RuleEntry { id: "high-entropy-token".into(), pattern: r"[A-Za-z0-9_\-]{32,}".into(), check: Some("entropy".into()), action: "log".into() },
+        [
+            RuleEntry {
+                id: "aws-access-key".into(),
+                pattern: r"AKIA[0-9A-Z]{16}".into(),
+                check: None,
+                action: "redact".into(),
+            },
+            RuleEntry {
+                id: "email".into(),
+                pattern: r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}".into(),
+                check: None,
+                action: "redact".into(),
+            },
+            RuleEntry {
+                id: "card".into(),
+                pattern: r"\b(?:\d[ -]?){13,19}\b".into(),
+                check: Some("luhn".into()),
+                action: "redact".into(),
+            },
+            RuleEntry {
+                id: "high-entropy-token".into(),
+                pattern: r"[A-Za-z0-9_\-]{32,}".into(),
+                check: Some("entropy".into()),
+                action: "log".into(),
+            },
         ]
         .iter()
         .map(|e| Rule::from_config(e).unwrap())
@@ -262,7 +282,11 @@ async fn run_duration_trial(
 
 async fn warmup(client: &reqwest::Client, target_url: &str, payload: Arc<Vec<u8>>, count: usize) {
     for _ in 0..count {
-        let _ = client.post(target_url).body(payload.as_slice().to_vec()).send().await;
+        let _ = client
+            .post(target_url)
+            .body(payload.as_slice().to_vec())
+            .send()
+            .await;
     }
 }
 
@@ -296,7 +320,9 @@ fn generate_clean_payload(size: usize) -> Arc<Vec<u8>> {
     let filler = r#"{"item": "catalog_product_id_882194", "status": "active"}"#;
     let mut out = String::from(r#"{"records": ["#);
     while out.len() + 2 < size {
-        if out.len() > 14 { out.push_str(", "); }
+        if out.len() > 14 {
+            out.push_str(", ");
+        }
         out.push_str(filler);
     }
     out.push_str("]}");
@@ -352,8 +378,15 @@ async fn main() {
     // 1. Certificate Resolution Measurement
     println!("--- 1. Certificate Resolution (Hudsucker RcgenAuthority + Moka Cache) ---");
     let (cold_ms, warm_ms) = measure_cert_resolution().await;
-    println!("Cold Resolution (Keygen + X.509 Minting): {:.2} ms", cold_ms);
-    println!("Warm Resolution (Moka Cache Hit, 1000 capacity, 300s TTL): {:.4} ms ({:.1} µs)", warm_ms, warm_ms * 1000.0);
+    println!(
+        "Cold Resolution (Keygen + X.509 Minting): {:.2} ms",
+        cold_ms
+    );
+    println!(
+        "Warm Resolution (Moka Cache Hit, 1000 capacity, 300s TTL): {:.4} ms ({:.1} µs)",
+        warm_ms,
+        warm_ms * 1000.0
+    );
     println!("Cache Speedup: {:.0}x\n", cold_ms / warm_ms.max(0.0001));
 
     // 2. Throughput & Latency Benchmarks
@@ -372,7 +405,9 @@ async fn main() {
     let trial_duration = Duration::from_secs(3);
 
     println!("--- 2. Forward HTTP Proxy Benchmark (7 Trials of 3s, 1st Discarded) ---");
-    println!("| Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | Mean (ms) | p50 (ms) | p99 (ms) | OK | Non-2xx | Conn Err | Leaked |");
+    println!(
+        "| Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | Mean (ms) | p50 (ms) | p99 (ms) | OK | Non-2xx | Conn Err | Leaked |"
+    );
     println!("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
 
     for (p_name, size) in &payloads {
@@ -395,11 +430,19 @@ async fn main() {
                 let client = match kind {
                     SetupKind::Direct => client_builder.build().unwrap(),
                     SetupKind::NoInspect => client_builder
-                        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_no_inspect_port}")).unwrap())
+                        .proxy(
+                            reqwest::Proxy::all(format!(
+                                "http://127.0.0.1:{proxy_no_inspect_port}"
+                            ))
+                            .unwrap(),
+                        )
                         .build()
                         .unwrap(),
                     SetupKind::InspectClean | SetupKind::InspectRedact => client_builder
-                        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_inspect_port}")).unwrap())
+                        .proxy(
+                            reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_inspect_port}"))
+                                .unwrap(),
+                        )
                         .build()
                         .unwrap(),
                 };
@@ -418,7 +461,14 @@ async fn main() {
                 // Run 7 timed trials of 3s, discard the first
                 let mut trials = Vec::new();
                 for trial_idx in 0..7 {
-                    let res = run_duration_trial(client.clone(), target_url.clone(), active_payload.clone(), *c, trial_duration).await;
+                    let res = run_duration_trial(
+                        client.clone(),
+                        target_url.clone(),
+                        active_payload.clone(),
+                        *c,
+                        trial_duration,
+                    )
+                    .await;
                     if trial_idx > 0 {
                         trials.push(res);
                     }
@@ -440,7 +490,11 @@ async fn main() {
                     _ => "-".to_string(),
                 };
 
-                let variance_flag = if min.rps > 0.0 && (max.rps / min.rps) > 1.5 { " [!]" } else { "" };
+                let variance_flag = if min.rps > 0.0 && (max.rps / min.rps) > 1.5 {
+                    " [!]"
+                } else {
+                    ""
+                };
 
                 println!(
                     "| {p_name} | {c} | {setup_name} | {med_rps:.1} [{min_rps:.1}–{max_rps:.1}]{variance_flag} | {mean:.2} | {p50:.2} | {p99:.2} | {total_ok} | {total_non_2xx} | {total_conn_err} | {leaked_col} |",

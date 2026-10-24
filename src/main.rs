@@ -16,9 +16,15 @@ use tracing::error;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    let config_path = std::env::args().nth(1).unwrap_or_else(|| "rules.toml".into());
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "rules.toml".into());
     let cfg = load_config(&config_path)?;
-    let rules: Vec<Rule> = cfg.rule.iter().filter_map(|r| Rule::from_config(r).ok()).collect();
+    let rules: Vec<Rule> = cfg
+        .rule
+        .iter()
+        .filter_map(|r| Rule::from_config(r).ok())
+        .collect();
     let scanner = Scanner::new(rules)?;
     let policy = Policy::new(&cfg.policy.default, &cfg.domain);
 

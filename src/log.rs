@@ -15,7 +15,13 @@ pub fn log_decision(host: &str, path: &str, action: &str, rules: &[String]) {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let entry = DecisionLog { timestamp, host, path, action, rules };
+    let entry = DecisionLog {
+        timestamp,
+        host,
+        path,
+        action,
+        rules,
+    };
     if let Ok(json) = serde_json::to_string(&entry) {
         println!("{json}");
     }

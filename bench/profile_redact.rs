@@ -38,10 +38,25 @@ fn generate_payload_with_secrets(size: usize) -> String {
 
 fn main() {
     println!("Initializing scanner for profiling...");
-    let rules = vec![
-        RuleEntry { id: "aws-access-key".into(), pattern: r"AKIA[0-9A-Z]{16}".into(), check: None, action: "redact".into() },
-        RuleEntry { id: "email".into(), pattern: r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}".into(), check: None, action: "redact".into() },
-        RuleEntry { id: "card".into(), pattern: r"\b(?:\d[ -]?){13,19}\b".into(), check: Some("luhn".into()), action: "redact".into() },
+    let rules = [
+        RuleEntry {
+            id: "aws-access-key".into(),
+            pattern: r"AKIA[0-9A-Z]{16}".into(),
+            check: None,
+            action: "redact".into(),
+        },
+        RuleEntry {
+            id: "email".into(),
+            pattern: r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}".into(),
+            check: None,
+            action: "redact".into(),
+        },
+        RuleEntry {
+            id: "card".into(),
+            pattern: r"\b(?:\d[ -]?){13,19}\b".into(),
+            check: Some("luhn".into()),
+            action: "redact".into(),
+        },
     ]
     .iter()
     .map(|e| Rule::from_config(e).unwrap())
@@ -57,7 +72,12 @@ fn main() {
     let hits_100k = scanner.scan(&p_100k);
     let hits_1m = scanner.scan(&p_1m);
 
-    println!("Hits found: 1KB={}, 100KB={}, 1MB={}", hits_1k.len(), hits_100k.len(), hits_1m.len());
+    println!(
+        "Hits found: 1KB={}, 100KB={}, 1MB={}",
+        hits_1k.len(),
+        hits_100k.len(),
+        hits_1m.len()
+    );
 
     println!("Profiling redact() on 1MB payload (running for ~5 seconds)...");
     let start_1m = Instant::now();
@@ -67,8 +87,12 @@ fn main() {
         std::hint::black_box(res);
         count_1m += 1;
     }
-    println!("Completed {} iterations of redact() on 1MB in {:.2}s ({:.2} µs/op)",
-        count_1m, start_1m.elapsed().as_secs_f64(), (start_1m.elapsed().as_secs_f64() * 1_000_000.0) / count_1m as f64);
+    println!(
+        "Completed {} iterations of redact() on 1MB in {:.2}s ({:.2} µs/op)",
+        count_1m,
+        start_1m.elapsed().as_secs_f64(),
+        (start_1m.elapsed().as_secs_f64() * 1_000_000.0) / count_1m as f64
+    );
 
     println!("Profiling redact() on 100KB payload (running for ~2 seconds)...");
     let start_100k = Instant::now();
@@ -78,8 +102,12 @@ fn main() {
         std::hint::black_box(res);
         count_100k += 1;
     }
-    println!("Completed {} iterations of redact() on 100KB in {:.2}s ({:.2} µs/op)",
-        count_100k, start_100k.elapsed().as_secs_f64(), (start_100k.elapsed().as_secs_f64() * 1_000_000.0) / count_100k as f64);
+    println!(
+        "Completed {} iterations of redact() on 100KB in {:.2}s ({:.2} µs/op)",
+        count_100k,
+        start_100k.elapsed().as_secs_f64(),
+        (start_100k.elapsed().as_secs_f64() * 1_000_000.0) / count_100k as f64
+    );
 
     println!("Profiling redact() on 1KB payload (running for ~1 second)...");
     let start_1k = Instant::now();
@@ -89,6 +117,10 @@ fn main() {
         std::hint::black_box(res);
         count_1k += 1;
     }
-    println!("Completed {} iterations of redact() on 1KB in {:.2}s ({:.2} µs/op)",
-        count_1k, start_1k.elapsed().as_secs_f64(), (start_1k.elapsed().as_secs_f64() * 1_000_000.0) / count_1k as f64);
+    println!(
+        "Completed {} iterations of redact() on 1KB in {:.2}s ({:.2} µs/op)",
+        count_1k,
+        start_1k.elapsed().as_secs_f64(),
+        (start_1k.elapsed().as_secs_f64() * 1_000_000.0) / count_1k as f64
+    );
 }

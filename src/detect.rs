@@ -2,10 +2,18 @@ use crate::config::RuleEntry;
 use regex::{Regex, RegexSet};
 
 #[derive(Debug, Clone)]
-pub enum Check { None, Luhn, Entropy(f64) }
+pub enum Check {
+    None,
+    Luhn,
+    Entropy(f64),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Action { Block, Redact, Log }
+pub enum Action {
+    Block,
+    Redact,
+    Log,
+}
 
 #[derive(Clone)]
 pub struct Rule {
@@ -16,7 +24,11 @@ pub struct Rule {
 }
 
 #[derive(Debug, Clone)]
-pub struct Hit { pub rule: usize, pub start: usize, pub end: usize }
+pub struct Hit {
+    pub rule: usize,
+    pub start: usize,
+    pub end: usize,
+}
 
 impl Rule {
     pub fn from_config(e: &RuleEntry) -> Result<Self, regex::Error> {
@@ -30,7 +42,12 @@ impl Rule {
             "redact" => Action::Redact,
             _ => Action::Log,
         };
-        Ok(Self { id: e.id.clone(), re: Regex::new(&e.pattern)?, check, action })
+        Ok(Self {
+            id: e.id.clone(),
+            re: Regex::new(&e.pattern)?,
+            check,
+            action,
+        })
     }
 }
 
@@ -49,7 +66,9 @@ impl Scanner {
     // ponytail: regex set pre-filters rules before exact position extraction
     pub fn scan(&self, text: &str) -> Vec<Hit> {
         let matches = self.set.matches(text);
-        if !matches.matched_any() { return vec![]; }
+        if !matches.matched_any() {
+            return vec![];
+        }
         let mut hits = vec![];
         for i in matches.into_iter() {
             let r = &self.rules[i];
@@ -59,7 +78,13 @@ impl Scanner {
                     Check::Luhn => luhn(m.as_str()),
                     Check::Entropy(min) => entropy(m.as_str()) >= min,
                 };
-                if ok { hits.push(Hit { rule: i, start: m.start(), end: m.end() }); }
+                if ok {
+                    hits.push(Hit {
+                        rule: i,
+                        start: m.start(),
+                        end: m.end(),
+                    });
+                }
             }
         }
         hits
@@ -68,19 +93,42 @@ impl Scanner {
 
 pub fn luhn(s: &str) -> bool {
     let d: Vec<u32> = s.chars().filter_map(|c| c.to_digit(10)).collect();
-    if d.len() < 13 || d.len() > 19 || !matches!(d[0], 3..=6) { return false; }
-    let sum: u32 = d.iter().rev().enumerate()
-        .map(|(i, &x)| if i % 2 == 1 { let y = x * 2; if y > 9 { y - 9 } else { y } } else { x })
+    if d.len() < 13 || d.len() > 19 || !matches!(d[0], 3..=6) {
+        return false;
+    }
+    let sum: u32 = d
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(i, &x)| {
+            if i % 2 == 1 {
+                let y = x * 2;
+                if y > 9 { y - 9 } else { y }
+            } else {
+                x
+            }
+        })
         .sum();
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 pub fn entropy(s: &str) -> f64 {
-    if s.is_empty() || s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') { return 0.0; }
+    if s.is_empty() || s.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        return 0.0;
+    }
     let mut counts = [0usize; 256];
-    for &b in s.as_bytes() { counts[b as usize] += 1; }
+    for &b in s.as_bytes() {
+        counts[b as usize] += 1;
+    }
     let n = s.len() as f64;
-    counts.iter().filter(|&&c| c > 0).map(|&c| { let p = c as f64 / n; -p * p.log2() }).sum()
+    counts
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / n;
+            -p * p.log2()
+        })
+        .sum()
 }
 
 pub fn redact(text: &str, hits: &[Hit]) -> String {

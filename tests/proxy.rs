@@ -72,7 +72,7 @@ async fn start_echo_server() -> (u16, tokio::task::JoinHandle<()>) {
 }
 
 fn test_rules() -> Vec<Rule> {
-    vec![
+    [
         RuleEntry {
             id: "aws-access-key".into(),
             pattern: r"AKIA[0-9A-Z]{16}".into(),
@@ -108,8 +108,14 @@ async fn test_proxy_end_to_end() {
     let ca = RcgenAuthority::new(issuer, 100, aws_lc_rs::default_provider());
 
     let domain_entries = vec![
-        DomainEntry { host: "ads.example.com".into(), action: "block".into() },
-        DomainEntry { host: "safe.internal".into(), action: "allow".into() },
+        DomainEntry {
+            host: "ads.example.com".into(),
+            action: "block".into(),
+        },
+        DomainEntry {
+            host: "safe.internal".into(),
+            action: "allow".into(),
+        },
     ];
     let policy = Policy::new("inspect", &domain_entries);
 

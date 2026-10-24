@@ -745,6 +745,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 [[package]]
 name = "hudsucker"
 version = "0.25.0"
+source = "git+https://github.com/omjadas/hudsucker#7b7baf3c528f7fcaa9cb7d03f3a7d84d5250eb9a"
 dependencies = [
  "async-compression",
  "bstr",

@@ -20,9 +20,15 @@ pub struct PolicyConfig {
     pub on_error: String,
 }
 
-fn default_inspect() -> String { "inspect".into() }
-fn default_max_bytes() -> usize { 1_048_576 }
-fn default_on_error() -> String { "block".into() }
+fn default_inspect() -> String {
+    "inspect".into()
+}
+fn default_max_bytes() -> usize {
+    1_048_576
+}
+fn default_on_error() -> String {
+    "block".into()
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DomainEntry {
@@ -39,7 +45,9 @@ pub struct RuleEntry {
     pub action: String,
 }
 
-fn default_log() -> String { "log".into() }
+fn default_log() -> String {
+    "log".into()
+}
 
 // ponytail: reads config from disk on startup; upgrade: hot-reload with notify
 pub fn load_config(path: &str) -> Result<Config, Box<dyn std::error::Error>> {

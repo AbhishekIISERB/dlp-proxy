@@ -4,7 +4,7 @@ use dlp_proxy::{
 };
 
 fn default_rules() -> Vec<Rule> {
-    vec![
+    [
         RuleEntry {
             id: "aws-access-key".into(),
             pattern: r"AKIA[0-9A-Z]{16}".into(),
@@ -44,16 +44,29 @@ fn generate_valid_luhn(seed: usize) -> String {
         .iter()
         .rev()
         .enumerate()
-        .map(|(i, &x)| if i % 2 == 0 { let y = x * 2; if y > 9 { y - 9 } else { y } } else { x })
+        .map(|(i, &x)| {
+            if i % 2 == 0 {
+                let y = x * 2;
+                if y > 9 { y - 9 } else { y }
+            } else {
+                x
+            }
+        })
         .sum();
     let check_digit = (10 - (sum % 10)) % 10;
     digits.push(check_digit);
-    digits.chunks(4).map(|c| c.iter().map(|d| d.to_string()).collect::<String>()).collect::<Vec<_>>().join("-")
+    digits
+        .chunks(4)
+        .map(|c| c.iter().map(|d| d.to_string()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 // Pseudo-random linear congruential generator for reproducible datasets
 fn lcg(state: &mut u64) -> u64 {
-    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *state
 }
 
@@ -79,9 +92,13 @@ fn main() {
             .collect();
         let key = format!("AKIA{suffix}");
         let payload = match i % 3 {
-            0 => format!(r#"{{"aws_access_key_id": "{key}", "region": "us-east-1", "action": "AssumeRole"}}"#),
+            0 => format!(
+                r#"{{"aws_access_key_id": "{key}", "region": "us-east-1", "action": "AssumeRole"}}"#
+            ),
             1 => format!("auth_type=iam&access_key={key}&version=2026-10-13"),
-            _ => format!("Authorization: AWS4-HMAC-SHA256 Credential={key}/20261013/us-east-1/s3/aws4_request"),
+            _ => format!(
+                "Authorization: AWS4-HMAC-SHA256 Credential={key}/20261013/us-east-1/s3/aws4_request"
+            ),
         };
         dataset.push((payload, vec!["aws-access-key"]));
     }
@@ -92,7 +109,9 @@ fn main() {
         let payload = match i % 3 {
             0 => format!(r#"{{"user": {{"id": {i}, "email": "{email}", "verified": true}}}}"#),
             1 => format!("grant_type=password&username={email}&client_id=web_app"),
-            _ => format!("POST /v1/notifications HTTP/1.1\r\nTo: {email}\r\nSubject: Security Alert"),
+            _ => {
+                format!("POST /v1/notifications HTTP/1.1\r\nTo: {email}\r\nSubject: Security Alert")
+            }
         };
         dataset.push((payload, vec!["email"]));
     }
@@ -101,7 +120,9 @@ fn main() {
     for i in 0..50 {
         let card = generate_valid_luhn(i + 1);
         let payload = match i % 3 {
-            0 => format!(r#"{{"payment": {{"card_number": "{card}", "cvv": "123", "exp": "11/29"}}}}"#),
+            0 => format!(
+                r#"{{"payment": {{"card_number": "{card}", "cvv": "123", "exp": "11/29"}}}}"#
+            ),
             1 => format!("payment_method=card&cc_number={card}&amount=49.99"),
             _ => format!("Customer checkout request: Card [{card}] authorized for $100.00"),
         };
@@ -129,7 +150,9 @@ fn main() {
     for i in 0..50 {
         let card = generate_valid_luhn(i + 100);
         let email = format!("shopper_{i}@onlinestore.org");
-        let payload = format!(r#"{{"order_id": 9900{i}, "customer_email": "{email}", "billing": {{"card": "{card}"}}}}"#);
+        let payload = format!(
+            r#"{{"order_id": 9900{i}, "customer_email": "{email}", "billing": {{"card": "{card}"}}}}"#
+        );
         dataset.push((payload, vec!["card", "email"]));
     }
 
@@ -142,7 +165,9 @@ fn main() {
     for _ in 0..50 {
         let mut u = String::new();
         for k in 0..32 {
-            if k == 8 || k == 12 || k == 16 || k == 20 { u.push('-'); }
+            if k == 8 || k == 12 || k == 16 || k == 20 {
+                u.push('-');
+            }
             let idx = (lcg(&mut rng) as usize) % hex.len();
             u.push(hex.chars().nth(idx).unwrap());
         }
@@ -173,7 +198,9 @@ fn main() {
             })
             .collect();
         let payload = if i % 2 == 0 {
-            format!("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.{b64_str}.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c")
+            format!(
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.{b64_str}.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+            )
         } else {
             format!(r#"{{"data_base64": "{b64_str}=="}}"#)
         };
@@ -221,7 +248,9 @@ fn main() {
             let matched = hits.iter().any(|h| scanner.rules[h.rule].id == *r_id);
             let is_target = expected_labels.contains(r_id);
 
-            if is_target { expected_pos += 1; }
+            if is_target {
+                expected_pos += 1;
+            }
 
             match (matched, is_target) {
                 (true, true) => tp += 1,
@@ -231,8 +260,16 @@ fn main() {
             }
         }
 
-        let precision = if tp + fp > 0 { (tp as f64 / (tp + fp) as f64) * 100.0 } else { 100.0 };
-        let recall = if tp + fn_count > 0 { (tp as f64 / (tp + fn_count) as f64) * 100.0 } else { 100.0 };
+        let precision = if tp + fp > 0 {
+            (tp as f64 / (tp + fp) as f64) * 100.0
+        } else {
+            100.0
+        };
+        let recall = if tp + fn_count > 0 {
+            (tp as f64 / (tp + fn_count) as f64) * 100.0
+        } else {
+            100.0
+        };
 
         println!(
             "| `{r_id}` | {expected_pos} | {tp} | {fp} | {fn_count} | **{precision:.1}%** | **{recall:.1}%** |"
