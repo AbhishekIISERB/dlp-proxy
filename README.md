@@ -3,7 +3,7 @@
 A high-performance, TLS-intercepting HTTP guardrail written in Rust on top of [hudsucker](https://github.com/omjadas/hudsucker) and Tokio. It operates as a bidirectional security proxy for autonomous LLM agents:
 1. **Outbound Data Loss Prevention (DLP):** Inspects agent requests for sensitive credentials (AWS keys, credit cards, emails, and high-entropy API tokens) to block or redact them before external egress. Role-aware parser handles OpenAI and Anthropic chat message structures.
 2. **Inbound Indirect Prompt Injection Defense:** Inspects third-party web content and tool execution outputs across a 3-tier heuristic defense (instruction overrides, hidden HTML/comments/zero-width characters, and exfiltration URLs) to block or sanitize malicious directives before they enter the agent's context window.
-3. **Low-Latency Streaming Scanner:** Sliding-window streaming scanner with multi-byte UTF-8 boundary handling, reducing Time-To-First-Byte (TTFB) by **12.7x–60.4x** (down to 36 µs on 1 MB streams) while sustaining **> 450 MB/s** throughput.
+3. **Low-Latency Streaming Scanner:** Sliding-window streaming scanner with multi-byte UTF-8 boundary handling, sustaining **395–475 MB/s** scanning throughput. In log-only mode, in-process scanner initial latency drops to **9–36 µs** (first chunk) vs. **206–2,180 µs** (full-body scan); in block/sanitize modes, full-body hold-back buffering is enforced for fail-closed security.
 
 ---
 
@@ -120,7 +120,7 @@ The core codebase is held strictly under an architectural line budget using the 
 | :--- | :--- | :--- | :--- |
 | `src/main.rs` | Load CA, parse config, start proxy | 60 | 59 |
 | `src/config.rs` | Parse `rules.toml` schema & inbound fields | 80 | 77 |
-| `src/policy.rs` | Domain routing, Direction & Trust policy | 140 | 135 |
+| `src/policy.rs` | Domain routing, wildcard matching & trust policy | 150 | 145 |
 | `src/detect.rs` | Outbound DLP (RegexSet, Luhn, stack entropy) | 160 | 152 |
 | `src/inject.rs` | 3-tier inbound injection detector & sanitizer | 140 | 134 |
 | `src/handler.rs` | Hudsucker request/response hook & stream router | 320 | 316 |
@@ -128,13 +128,13 @@ The core codebase is held strictly under an architectural line budget using the 
 | `src/stream.rs` | Sliding-window streaming scanner (256B overlap) | 100 | 100 |
 | `src/log.rs` | Structured JSON audit decision logger | 40 | 40 |
 | `src/lib.rs` | Module exports | 10 | 8 |
-| **Total Core Code** | | **1,140** | **1,093** |
+| **Total Core Code** | | **1,150** | **1,103** |
 
 ### Shortcut Ledger (`grep -rn "ponytail:" src/`)
 
 All intentional shortcuts are tagged in code with explicit upgrade paths:
-1. `src/policy.rs:130`: Exact host match only.  
-   *Upgrade path:* Support wildcard globs (`*.openai.com`) and suffix matching.
+1. `src/policy.rs:141`: Exact and wildcard domain matching (`*.example.com` implemented in P8.3).  
+   *Upgrade path:* Full glob/regex domain patterns or CIDR IP range matching.
 2. `src/handler.rs:94`: In-memory body buffering up to size cap for blocking/sanitization.  
    *Upgrade path:* Hold-back sliding buffer for chunked HTTP responses.
 3. `src/handler.rs:104, 226`: Text, JSON, and XML bodies inspected; binary media skipped with audit log.  
@@ -160,12 +160,12 @@ Evaluated across **600 partitioned samples** (50% attack, 50% benign) using `car
 | Metric | Dev Split (300) | Held-Out Test Split (300) | Description |
 | :--- | :--- | :--- | :--- |
 | **Precision** | **78.3%** | **79.2%** | High precision on standard phrasing; FPs from security articles discussing attacks |
-| **Recall** | **60.0%** | **63.3%** | Overall recall across all 3 tiers |
+| **Recall** | **60.0%** (90/150) | **63.3%** (95/150) | Overall recall across all 3 tiers |
 | **F1 Score** | **67.9%** | **70.4%** | Harmonic mean of precision and recall |
 | **False Positive Rate** | **16.7%** | **16.7%** | Zero false alarms on standard web pages; trips on defensive quote samples |
-| **Tier 1 Recall** | 56.0% | **56.0%** | Direct overrides, system markers, and concealment |
-| **Tier 2 Recall** | 82.2% | **82.2%** | Hidden CSS styling, HTML comments, aria-hidden, zero-width |
-| **Tier 3 Recall** | 53.3% | **53.3%** | Markdown exfiltration images and token leakage URLs |
+| **Tier 1 Recall** | **49.3%** (37/75) | **56.0%** (42/75) | Direct overrides, system markers, and concealment |
+| **Tier 2 Recall** | **77.8%** (35/45) | **82.2%** (37/45) | Hidden CSS styling, HTML comments, aria-hidden, zero-width |
+| **Tier 3 Recall** | **60.0%** (18/30) | **53.3%** (16/30) | Markdown exfiltration images and token leakage URLs |
 
 ### 2. Adaptive Attacker Evasion Matrix (Held-Out Adversarial Set)
 Evaluated on **35 held-out evasion techniques** without post-hoc rule tuning (`bench/INJECTION_RESULTS.md`):
@@ -175,17 +175,21 @@ Evaluated on **35 held-out evasion techniques** without post-hoc rule tuning (`b
 - **Structural Obfuscation:** Partial defense (whitespace and table splitting detected; homoglyphs bypassed).
 - *Takeaway:* Documents the honest boundary of regex heuristics; ideal as a low-overhead, zero-GPU first line of defense combined with a downstream semantic judge.
 
-### 3. Streaming TTFB & Inbound Scan Performance
-- **Time-To-First-Byte (TTFB):**
-  - 16 KB: Buffered 206 µs vs. Streaming 9.3 µs (**22.2x lower initial latency**).
-  - 1 MB: Buffered 2.18 ms vs. Streaming 36.1 µs (**60.4x lower initial latency**).
-- **Scan Throughput:** Sustained at **440–475 MB/s** in release profile.
+### 3. In-Process Streaming Scanner Latency & Inbound Scan Performance
+- **Initial Chunk Processing Latency (Log-Only Mode Microbenchmark):**
+  - 16 KB: Buffered scan 206.0 µs vs. Streaming first-chunk scan 9.3 µs (**22.2x lower initial latency**).
+  - 1 MB: Buffered scan 2,177.0 µs (2.18 ms) vs. Streaming first-chunk scan 36.1 µs (**60.4x lower initial latency**).
+  - *Note:* In `block` and `sanitize` modes, the proxy must buffer full responses before forwarding to ensure malicious directives are halted.
+- **Scan Throughput:** Sustained at **395–475 MB/s** in release profile.
 - **Boundary Property Test:** Verified 100% detection rate across every single byte split offset across chunk boundaries (`tests/stream.rs`).
 
 ### 4. Outbound DLP & Dynamic CA Performance
 - **Adversarial DLP Corpus (500 samples):** 100% recall on AWS keys, emails, cards, and entropy tokens; **97.1% card precision** with BIN prefix validation + Luhn checksum.
-- **Dynamic CA Minting:** **2.19 ms cold** vs. **0.3 µs cached** using Hudsucker's Moka cache (**7,499x speedup**).
-- **Forward Proxy Throughput:** **1,122 req/s** @ 100 KB, **663 req/s** @ 1 MB (concurrency 16), retaining 81%–94% of raw proxy throughput.
+- **Dynamic CA Minting:** **1.96 ms cold** vs. **0.3 µs warm** using Hudsucker's Moka cache (**6,735x speedup**).
+- **Forward Proxy Throughput (Full 316-Line Handler):**
+  - **100 KB @ Concurrency 16:** Clean **838.3 req/s** (73.1% retention of pass-through proxy 1,147.3 req/s); Redact **655.6 req/s** (57.1%).
+  - **1 MB @ Concurrency 16:** Clean **127.1 req/s** (33.1% retention of pass-through proxy 383.8 req/s); Redact **112.2 req/s** (29.2%).
+  - **Zero Leaks:** 0 leaked secrets across all benchmark runs.
 
 ---
 
@@ -201,7 +205,7 @@ Evaluated on **35 held-out evasion techniques** without post-hoc rule tuning (`b
 ## Resume Bullets
 
 - *Engineered a two-way TLS-intercepting LLM-agent security proxy in Rust using Hudsucker and Tokio, providing outbound DLP redaction and inbound 3-tier indirect prompt injection defense.*
-- *Implemented a zero-GPU 3-tier injection detector (instruction overrides, hidden CSS/HTML/zero-width characters, and exfiltration URLs) operating at > 450 MB/s sustained throughput with 2.1 ms latency on 1 MB payloads.*
-- *Architected a sliding-window streaming scanner with multi-byte UTF-8 boundary safety, reducing Time-To-First-Byte (TTFB) by 60.4x (2.18 ms down to 36 µs) on 1 MB payloads with exhaustive byte-by-byte boundary property testing.*
+- *Implemented a zero-GPU 3-tier injection detector (instruction overrides, hidden CSS/HTML/zero-width characters, and exfiltration URLs) operating at 395–475 MB/s sustained scan throughput with ~2.2 ms latency on 1 MB payloads.*
+- *Architected a sliding-window streaming scanner with multi-byte UTF-8 boundary safety, reducing initial chunk processing time by 60.4x (2.18 ms down to 36 µs) on 1 MB payloads in log-only mode, with exhaustive byte-by-byte boundary property testing.*
 - *Conducted rigorous held-out adversarial evaluations across 600 dev/test samples and a 35-sample adaptive attack evasion set; honestly benchmarked the boundary of regex heuristics (74.3% evasion bypass rate on paraphrasing/multilingual attacks) to define defense-in-depth requirements.*
-- *Maintained strict engineering discipline: 1,093 total lines under Ponytail line budgets, zero compiler warnings on `-D warnings`, zero sensitive data logged, and 29 automated table-driven and end-to-end integration tests.*
+- *Maintained strict engineering discipline: 1,103 total lines under Ponytail line budgets, zero compiler warnings on `-D warnings`, zero sensitive data logged, and 30 automated table-driven and end-to-end integration tests.*

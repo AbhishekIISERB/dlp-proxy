@@ -54,9 +54,9 @@ Inbound inspection applies strictly to text-based MIME types (`text/*`, `applica
 
 In standard HTTP streaming (Server-Sent Events, chunked transfer encoding, long responses), packets forwarded to downstream clients cannot be recalled.
 - **The Trade-Off:**
-  - If the proxy forwards chunks in real time (`inbound_action = "log"`), TTFB is minimized (9–36 µs), but an injection detected in chunk $K$ cannot un-send chunks $1..K-1$ that the LLM agent may have already processed.
-  - If the proxy blocks or sanitizes (`inbound_action = "block"` or `"sanitize"`), it **must hold back chunks** until the size cap or stream completion is reached.
-- **Conclusion:** True zero-latency streaming and guaranteed fail-closed blocking are fundamentally mutually exclusive in standard network proxying.
+  - If the proxy forwards chunks in real time (`inbound_action = "log"`), initial chunk processing latency is minimal (9–36 µs in scanner microbenchmarks vs. 206–2,180 µs to buffer and scan 16 KB–1 MB payloads), but an injection detected in chunk $K$ cannot un-send chunks $1..K-1$ that the LLM agent may have already processed.
+  - If the proxy blocks or sanitizes (`inbound_action = "block"` or `"sanitize"`), it **must hold back chunks** until the size cap or stream completion is reached before forwarding to ensure malicious directives are halted.
+- **Conclusion:** Zero-latency chunk forwarding and guaranteed fail-closed blocking are fundamentally mutually exclusive in standard network proxying.
 
 ---
 
@@ -69,9 +69,9 @@ To mitigate these limitations in production, organizations should treat `dlp-pro
              |
              v
 +-----------------------------+
-|   Tier 0: DLP Proxy (Rust)   |  --> Linear-time regex (< 2 ms, > 450 MB/s)
-|   - Size caps & fail-closed |  --> Drops 100% of naive/overt injections & known delimiters
-|   - Strip hidden HTML/zeros |  --> Zero GPU cost; eliminates 60-80% of automated scans
+|   Tier 0: DLP Proxy (Rust)   |  --> Linear-time regex (395–475 MB/s, ~2.2 ms for 1 MB)
+|   - Size caps & fail-closed |  --> Zero GPU cost; filters literal overrides & delimiters
+|   - Strip hidden HTML/zeros |  --> Strips hidden styles, comments & zero-width characters
 +-----------------------------+
              | (Sanitized / Cleaned)
              v

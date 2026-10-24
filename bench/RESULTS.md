@@ -55,9 +55,9 @@ In Hudsucker v0.25.0 (`hudsucker/src/certificate_authority/rcgen_authority.rs:48
 
 | Operation | Latency | Description |
 | :--- | :--- | :--- |
-| **Cold Certificate Resolution (1st request)** | **2.19 ms** | Ephemeral keypair generation, X.509 cert creation & local CA signature, Moka cache insertion |
+| **Cold Certificate Resolution (1st request)** | **1.96 ms** | Ephemeral keypair generation, X.509 cert creation & local CA signature, Moka cache insertion |
 | **Warm Certificate Resolution (2nd+ request)** | **0.0003 ms** (0.3 µs) | In-memory Moka cache hit (1,000 capacity, 300s TTL); immediate `Arc<ServerConfig>` reuse |
-| **Resolution Speedup Factor** | **7,499x** | Cache eliminates dynamic certificate minting overhead on warm requests |
+| **Resolution Speedup Factor** | **6,735x** | Cache eliminates dynamic certificate minting overhead on warm requests |
 
 ---
 
@@ -74,42 +74,42 @@ In Hudsucker v0.25.0 (`hudsucker/src/certificate_authority/rcgen_authority.rs:48
 
 | Payload | Concurrency | Setup | Requests/sec (Med [Min–Max]) | Mean (ms) | p50 (ms) | p99 (ms) | OK | Non-2xx | Conn Err | Leaked |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1 KB** | 1 | Direct | 36,649.9 [35143.5–37462.4] | 0.03 | 0.03 | 0.05 | 654,035 | 0 | 0 | - |
-| 1 KB | 1 | Proxy (No Inspect) | 2,710.6 [1968.7–3701.3] [!] | 0.37 | 0.20 | 2.97 | 48,390 | 0 | 0 | - |
-| 1 KB | 1 | Proxy (Inspect On - Clean) | 1,498.4 [1316.9–1750.6] | 0.67 | 0.20 | 7.66 | 26,890 | 0 | 0 | - |
-| 1 KB | 1 | Proxy (Inspect On - Redact) | **692.3** [580.6–778.9] | **1.44** | **0.26** | **17.32** | 12,295 | 0 | 0 | **0** |
-| **1 KB** | 16 | Direct | 132,730.3 [119462.8–139474.9] | 0.12 | 0.11 | 0.27 | 2,363,560 | 0 | 0 | - |
-| 1 KB | 16 | Proxy (No Inspect) | 1,097.2 [959.0–1121.5] | 14.54 | 11.10 | 32.14 | 19,219 | 0 | 0 | - |
-| 1 KB | 16 | Proxy (Inspect On - Clean) | 953.6 [842.0–1002.2] | 16.72 | 12.96 | 40.34 | 16,807 | 0 | 0 | - |
-| 1 KB | 16 | Proxy (Inspect On - Redact) | **609.2** [542.2–646.7] | **26.16** | **26.00** | **51.81** | 10,810 | 0 | 0 | **0** |
-| **1 KB** | 64 | Direct | 112,164.8 [103574.9–117766.7] | 0.57 | 0.54 | 1.26 | 1,987,465 | 0 | 0 | - |
-| 1 KB | 64 | Proxy (No Inspect) | 729.8 [598.8–762.5] | 87.29 | 85.10 | 158.32 | 12,568 | 0 | 0 | - |
-| 1 KB | 64 | Proxy (Inspect On - Clean) | 646.3 [563.9–672.6] | 98.94 | 96.89 | 161.97 | 11,636 | 0 | 0 | - |
-| 1 KB | 64 | Proxy (Inspect On - Redact) | **447.9** [415.1–461.4] | **142.14** | **141.76** | **226.48** | 8,117 | 0 | 0 | **0** |
-| **100 KB** | 1 | Direct | 3,249.9 [2384.1–3341.2] | 0.31 | 0.29 | 0.44 | 53,815 | 0 | 0 | - |
-| 100 KB | 1 | Proxy (No Inspect) | 577.6 [555.7–611.6] | 1.73 | 0.52 | 18.36 | 10,471 | 0 | 0 | - |
-| 100 KB | 1 | Proxy (Inspect On - Clean) | 534.3 [469.5–570.5] | 1.87 | 0.84 | 15.06 | 9,506 | 0 | 0 | - |
-| 100 KB | 1 | Proxy (Inspect On - Redact) | **189.9** [160.1–218.2] | **5.26** | **1.97** | **53.86** | 3,454 | 0 | 0 | **0** |
-| **100 KB** | 16 | Direct | 6,125.4 [5186.1–6645.8] | 2.59 | 1.67 | 26.05 | 108,493 | 0 | 0 | - |
-| 100 KB | 16 | Proxy (No Inspect) | 248.1 [189.8–277.8] | 64.44 | 52.37 | 183.74 | 4,203 | 0 | 0 | - |
-| 100 KB | 16 | Proxy (Inspect On - Clean) | 247.7 [164.2–287.7] [!] | 64.56 | 53.90 | 226.94 | 4,320 | 0 | 0 | - |
-| 100 KB | 16 | Proxy (Inspect On - Redact) | **175.0** [137.4–207.9] [!] | **90.54** | **81.34** | **314.09** | 3,132 | 0 | 0 | **0** |
-| **100 KB** | 64 | Direct | 5,306.0 [4558.3–5950.5] | 11.97 | 9.33 | 52.93 | 95,551 | 0 | 0 | - |
-| 100 KB | 64 | Proxy (No Inspect) | 244.3 [183.6–273.4] | 260.71 | 242.83 | 498.43 | 4,277 | 0 | 0 | - |
-| 100 KB | 64 | Proxy (Inspect On - Clean) | 326.8 [210.3–410.4] [!] | 194.82 | 186.01 | 374.15 | 5,588 | 0 | 0 | - |
-| 100 KB | 64 | Proxy (Inspect On - Redact) | **214.2** [148.3–298.6] [!] | **294.35** | **286.26** | **506.85** | 4,011 | 0 | 0 | **0** |
-| **1 MB** | 1 | Direct | 413.1 [381.2–427.3] | 2.42 | 2.36 | 3.53 | 7,345 | 0 | 0 | - |
-| 1 MB | 1 | Proxy (No Inspect) | 254.0 [240.0–281.9] | 3.93 | 3.48 | 10.44 | 4,598 | 0 | 0 | - |
-| 1 MB | 1 | Proxy (Inspect On - Clean) | 145.4 [133.5–147.1] | 6.88 | 6.42 | 14.87 | 2,564 | 0 | 0 | - |
-| 1 MB | 1 | Proxy (Inspect On - Redact) | **105.8** [97.1–107.1] | **9.45** | **9.03** | **16.52** | 1,872 | 0 | 0 | **0** |
-| **1 MB** | 16 | Direct | 1,771.7 [1727.4–1833.9] | 9.02 | 8.84 | 16.87 | 32,000 | 0 | 0 | - |
-| 1 MB | 16 | Proxy (No Inspect) | 333.3 [303.8–343.6] | 47.89 | 45.01 | 105.48 | 5,979 | 0 | 0 | - |
-| 1 MB | 16 | Proxy (Inspect On - Clean) | 292.4 [266.1–307.1] | 54.32 | 51.14 | 112.65 | 5,321 | 0 | 0 | - |
-| 1 MB | 16 | Proxy (Inspect On - Redact) | **171.9** [117.1–219.0] [!] | **91.56** | **90.43** | **156.50** | 3,029 | 0 | 0 | **0** |
-| **1 MB** | 64 | Direct | 978.9 [645.3–1094.1] [!] | 64.88 | 59.42 | 168.69 | 16,449 | 0 | 0 | - |
-| 1 MB | 64 | Proxy (No Inspect) | 230.6 [174.6–232.8] | 275.59 | 266.39 | 455.78 | 4,012 | 0 | 0 | - |
-| 1 MB | 64 | Proxy (Inspect On - Clean) | 220.2 [201.8–226.6] | 288.12 | 281.61 | 471.37 | 4,074 | 0 | 0 | - |
-| 1 MB | 64 | Proxy (Inspect On - Redact) | **153.0** [123.5–174.2] | **412.14** | **409.51** | **679.90** | 2,872 | 0 | 0 | **0** |
+| **1 KB** | 1 | Direct | 37,256.3 [36963.9–37318.5] | 0.03 | 0.03 | 0.05 | 669,847 | 0 | 0 | - |
+| 1 KB | 1 | Proxy (No Inspect) | 4,794.1 [3524.0–6323.8] [!] | 0.21 | 0.09 | 2.32 | 82,173 | 0 | 0 | - |
+| 1 KB | 1 | Proxy (Inspect On - Clean) | 2,638.6 [2122.0–2897.1] | 0.38 | 0.19 | 4.88 | 48,056 | 0 | 0 | - |
+| 1 KB | 1 | Proxy (Inspect On - Redact) | **1,702.8** [1372.6–2043.6] | **0.59** | **0.26** | **9.22** | 29,583 | 0 | 0 | **0** |
+| **1 KB** | 16 | Direct | 108,991.8 [105250.6–116561.7] | 0.15 | 0.14 | 0.28 | 1,964,298 | 0 | 0 | - |
+| 1 KB | 16 | Proxy (No Inspect) | 1,805.4 [1360.8–2208.3] [!] | 8.86 | 5.75 | 36.52 | 32,847 | 0 | 0 | - |
+| 1 KB | 16 | Proxy (Inspect On - Clean) | 1,864.8 [1657.4–2195.4] | 8.58 | 6.35 | 31.48 | 34,437 | 0 | 0 | - |
+| 1 KB | 16 | Proxy (Inspect On - Redact) | **1,107.6** [713.5–1266.3] [!] | **14.41** | **11.07** | **69.92** | 19,208 | 0 | 0 | **0** |
+| **1 KB** | 64 | Direct | 111,653.7 [109808.4–113208.0] | 0.57 | 0.56 | 0.95 | 2,007,466 | 0 | 0 | - |
+| 1 KB | 64 | Proxy (No Inspect) | 1,554.2 [1491.3–1590.7] | 41.15 | 38.65 | 86.60 | 27,973 | 0 | 0 | - |
+| 1 KB | 64 | Proxy (Inspect On - Clean) | 1,422.2 [1243.0–1487.0] | 44.94 | 42.29 | 98.11 | 25,266 | 0 | 0 | - |
+| 1 KB | 64 | Proxy (Inspect On - Redact) | **1,015.2** [960.3–1067.8] | **62.91** | **59.97** | **117.57** | 18,346 | 0 | 0 | **0** |
+| **100 KB** | 1 | Direct | 3,234.2 [3198.6–3305.6] | 0.31 | 0.31 | 0.36 | 58,319 | 0 | 0 | - |
+| 100 KB | 1 | Proxy (No Inspect) | 1,055.2 [975.6–1092.6] | 0.95 | 0.65 | 7.71 | 18,779 | 0 | 0 | - |
+| 100 KB | 1 | Proxy (Inspect On - Clean) | 410.6 [405.4–423.6] | 2.43 | 2.12 | 8.58 | 7,400 | 0 | 0 | - |
+| 100 KB | 1 | Proxy (Inspect On - Redact) | **353.2** [340.1–356.9] | **2.83** | **2.50** | **9.58** | 6,321 | 0 | 0 | **0** |
+| **100 KB** | 16 | Direct | 15,668.5 [15202.4–15981.0] | 1.02 | 0.99 | 2.03 | 279,864 | 0 | 0 | - |
+| 100 KB | 16 | Proxy (No Inspect) | 1,147.3 [1114.3–1203.0] | 13.94 | 11.90 | 57.30 | 20,704 | 0 | 0 | - |
+| 100 KB | 16 | Proxy (Inspect On - Clean) | 838.3 [813.7–868.9] | 19.08 | 16.55 | 64.10 | 15,103 | 0 | 0 | - |
+| 100 KB | 16 | Proxy (Inspect On - Redact) | **655.6** [583.7–670.7] | **24.38** | **22.31** | **75.65** | 11,595 | 0 | 0 | **0** |
+| **100 KB** | 64 | Direct | 14,962.3 [14577.6–15065.2] | 4.27 | 4.21 | 7.29 | 267,341 | 0 | 0 | - |
+| 100 KB | 64 | Proxy (No Inspect) | 1,025.6 [813.7–1090.4] | 62.24 | 59.70 | 114.35 | 17,741 | 0 | 0 | - |
+| 100 KB | 64 | Proxy (Inspect On - Clean) | 765.1 [729.5–776.7] | 83.38 | 79.72 | 152.60 | 13,806 | 0 | 0 | - |
+| 100 KB | 64 | Proxy (Inspect On - Redact) | **573.0** [518.5–601.8] | **111.21** | **105.56** | **207.52** | 10,265 | 0 | 0 | **0** |
+| **1 MB** | 1 | Direct | 431.3 [427.6–431.8] | 2.32 | 2.31 | 2.54 | 7,749 | 0 | 0 | - |
+| 1 MB | 1 | Proxy (No Inspect) | 186.0 [144.2–196.0] | 5.37 | 4.71 | 20.77 | 3,153 | 0 | 0 | - |
+| 1 MB | 1 | Proxy (Inspect On - Clean) | 47.9 [40.9–52.4] | 20.88 | 19.27 | 48.22 | 853 | 0 | 0 | - |
+| 1 MB | 1 | Proxy (Inspect On - Redact) | **39.9** [37.5–42.1] | **25.07** | **24.07** | **57.43** | 718 | 0 | 0 | **0** |
+| **1 MB** | 16 | Direct | 1,191.9 [1067.1–1222.0] | 13.40 | 13.09 | 24.53 | 20,891 | 0 | 0 | - |
+| 1 MB | 16 | Proxy (No Inspect) | 383.8 [248.9–469.8] [!] | 41.47 | 30.24 | 245.86 | 6,867 | 0 | 0 | - |
+| 1 MB | 16 | Proxy (Inspect On - Clean) | 127.1 [113.2–131.1] | 125.47 | 117.69 | 263.66 | 2,293 | 0 | 0 | - |
+| 1 MB | 16 | Proxy (Inspect On - Redact) | **112.2** [108.5–116.9] | **140.98** | **127.10** | **296.40** | 2,058 | 0 | 0 | **0** |
+| **1 MB** | 64 | Direct | 1,308.8 [1215.7–1417.2] | 48.73 | 47.74 | 81.73 | 23,670 | 0 | 0 | - |
+| 1 MB | 64 | Proxy (No Inspect) | 378.4 [249.8–410.6] [!] | 166.24 | 158.25 | 361.59 | 6,242 | 0 | 0 | - |
+| 1 MB | 64 | Proxy (Inspect On - Clean) | 99.3 [94.1–104.9] | 639.75 | 627.26 | 1105.64 | 1,975 | 0 | 0 | - |
+| 1 MB | 64 | Proxy (Inspect On - Redact) | **91.7** [74.7–101.9] | **679.40** | **639.02** | **1280.20** | 1,757 | 0 | 0 | **0** |
 
 *Note: Rows marked `[!]` exhibit max/min ratios $> 1.5$.*
 
@@ -141,9 +141,10 @@ By replacing multiple independent regex passes with `regex::RegexSet` pre-filter
 | **1 MB @ Concurrency 16** | 168.7 req/s (p50: 92.21 ms) | **663.3 req/s** (p50: 23.51 ms) | **3.9x faster** | **-68.70 ms (-74.5%)** |
 | **1 MB @ Concurrency 64** | 170.2 req/s (p50: 354.52 ms) | **588.9 req/s** (p50: 107.61 ms) | **3.5x faster** | **-246.91 ms (-69.6%)** |
 
-### Inspection Cost Summary
-- **100 KB Payloads:** Inspection retains **93.8%–97.3%** of pass-through proxy throughput across concurrencies 1 and 16.
-- **1 MB Payloads:** Inspection throughput holds at **663.3 req/s** (80.8% of pass-through proxy throughput at concurrency 16), adding **~8.0 ms p50 latency** at concurrency 16.
+### Two-Way Proxy Inspection Cost Summary (Current Handler)
+- **100 KB Payloads @ C=16:** Clean inspection achieves **838.3 req/s** (**73.1%** throughput retention vs. pass-through proxy 1,147.3 req/s, p50: 16.55 ms); Redaction achieves **655.6 req/s** (**57.1%** retention, p50: 22.31 ms).
+- **1 MB Payloads @ C=16:** Clean inspection achieves **127.1 req/s** (**33.1%** throughput retention vs. pass-through proxy 383.8 req/s, p50: 117.69 ms); Redaction achieves **112.2 req/s** (**29.2%** retention, p50: 127.10 ms).
+- **Zero Leaks:** 0 planted secrets reached the upstream server across all benchmark runs.
 
 ### Reproduction Command
 ```bash

@@ -1,30 +1,28 @@
-# Streaming Inspection & Time-To-First-Byte (TTFB) Benchmark
+# Streaming Inspection: In-Process Scanner Microbenchmark & Hold-Back Constraints
 
 ## 1. Overview & Architectural Trade-Offs
 
-When an LLM agent consumes large web responses or long-context documents, full-body buffering introduces a Time-To-First-Byte (TTFB) penalty proportional to document size. `StreamScanner` provides a sliding-window streaming scanner with a `MAX_MATCH_LEN` (256-byte) overlap tail, rolling size cap enforcement, and safe multi-byte UTF-8 boundary management.
+When an LLM agent consumes large web responses or long-context documents, full-body buffering in memory introduces processing latency proportional to document size before any data can be inspected or evaluated. `StreamScanner` provides a sliding-window streaming scanner with a `MAX_MATCH_LEN` (256-byte) overlap tail, rolling size cap enforcement, and safe multi-byte UTF-8 boundary management.
 
 ### The Streaming Security Invariant & Decision Point
-- **Forwarded Chunks Cannot Be Un-Sent:** In an HTTP proxy, once a byte chunk is flushed to the downstream client (the LLM agent), it cannot be recalled or redacted.
+- **Forwarded Chunks Cannot Be Un-Sent:** In an HTTP proxy, once a network chunk is flushed to the downstream client (the LLM agent), it cannot be recalled or redacted.
 - **Decision:**
-  - For `inbound_action = "log"`, streaming inspection processes chunks in real time, emitting detections without blocking or delaying stream delivery. TTFB drops to the time required to inspect only the first chunk (~9–36 µs).
-  - For `inbound_action = "block"` or `"sanitize"`, full-body hold-back buffering is strictly required to preserve the fail-closed security guarantee: malicious instructions cannot reach the agent's context window.
+  - **Log-Only Forwarding (`inbound_action = "log"`):** The proxy can stream chunks immediately to the agent as they arrive, scanning them incrementally with minimal initial processing latency (9–36 µs for the first chunk in scanner microbenchmarks). Any detected injection is logged for audit.
+  - **Blocking & Sanitizing (`inbound_action = "block"` or `"sanitize"`):** The proxy **must hold back chunks** in an internal buffer until stream completion or size-cap limit, because an injection detected in chunk $K$ cannot recall chunks $1..K-1$ that the agent may have already processed.
 
 ---
 
-## 2. Benchmark Results: TTFB and Throughput
+## 2. In-Process Scanner Microbenchmark (Log-Only Mode)
 
-Measured on Apple Silicon (arm64, macOS, rustc 1.94.1, `--release` profile via `cargo run --release --example stream_bench`):
+Measured via `cargo run --release --example stream_bench` comparing the time required to process the first chunk (`StreamScanner::process_chunk`) versus buffering and scanning the entire payload (`inject::scan`) before emitting any output:
 
-| Payload Size | Chunk Size | Chunks | Buffered TTFB | Streaming TTFB | TTFB Reduction | Total Throughput |
+| Payload Size | Chunk Size | Chunks | Full-Body Scan Latency | First-Chunk Stream Latency | Initial Latency Ratio | Scanning Throughput |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **16 KB** | 4 KB | 4 | **206.0 µs** | **9.3 µs** | **22.2x lower** | 404.2 MB/s |
-| **100 KB** | 8 KB | 13 | **227.6 µs** | **17.9 µs** | **12.7x lower** | 432.6 MB/s |
-| **1 MB** | 16 KB | 64 | **2,177.0 µs** (2.18 ms) | **36.1 µs** | **60.4x lower** | 436.7 MB/s |
+| **16 KB** | 4 KB | 4 | **206.0 µs** | **9.3 µs** | **22.2x lower initial latency** | 404.2 MB/s |
+| **100 KB** | 8 KB | 13 | **227.6 µs** | **17.9 µs** | **12.7x lower initial latency** | 432.6 MB/s |
+| **1 MB** | 16 KB | 64 | **2,177.0 µs** (2.18 ms) | **36.1 µs** | **60.4x lower initial latency** | 436.7 MB/s |
 
-### Key Observations
-1. **TTFB Scaling:** Buffered TTFB scales linearly with document size ($O(N)$), reaching **2.18 ms** on 1 MB documents. Streaming TTFB remains essentially constant ($O(1)$ chunk scan, **9–36 µs**), yielding a **60.4x latency improvement** on 1 MB streams.
-2. **Sustained Throughput:** Both buffered and streaming pipelines sustain **> 430 MB/s** throughput on modern hardware with linear-time regular expressions.
+*Note: This microbenchmark measures in-process scanner execution time in log-only mode, not end-to-end network proxy TTFB. In block/sanitize modes, the proxy must buffer the full body before forwarding.*
 
 ---
 

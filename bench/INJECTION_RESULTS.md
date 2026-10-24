@@ -26,13 +26,13 @@ Evaluation follows strict **generalization and held-out evaluation discipline**:
 | **F1 Score** | **67.9%** | **70.4%** | >= 90.0% |
 | **False Positive Rate (FPR)** | **16.7%** | **16.7%** | <= 5.0% |
 
-### Per-Tier Detection Recall (Held-Out Test Set)
+### Per-Tier Detection Recall (Dev vs. Held-Out Test)
 
-| Tier | Description | Attack Samples | Detected | Recall |
-| :--- | :--- | :--- | :--- | :--- |
-| **Tier 1** | Instruction Override, Role Switch, Markers, Concealment | 75 | 42 | **56.0%** |
-| **Tier 2** | HTML Hidden Styles, Comments, Aria-Hidden, Zero-Width | 45 | 37 | **82.2%** |
-| **Tier 3** | Markdown Image Exfil & High-Entropy Query Params | 30 | 16 | **53.3%** |
+| Tier | Description | Dev Recall (TP/Total) | Held-Out Test Recall (TP/Total) |
+| :--- | :--- | :--- | :--- |
+| **Tier 1** | Instruction Override, Role Switch, Markers, Concealment | 37 / 75 (**49.3%**) | 42 / 75 (**56.0%**) |
+| **Tier 2** | HTML Hidden Styles, Comments, Aria-Hidden, Zero-Width | 35 / 45 (**77.8%**) | 37 / 45 (**82.2%**) |
+| **Tier 3** | Markdown Image Exfil & High-Entropy Query Params | 18 / 30 (**60.0%**) | 16 / 30 (**53.3%**) |
 
 ---
 
@@ -85,19 +85,19 @@ Measured on 100 KB and 1 MB payloads comparing pass-through vs. clean and attack
 | Payload Size | Operation | Mean Latency | Scan Throughput | Overhead vs. Pass-Through |
 | :--- | :--- | :--- | :--- | :--- |
 | **100 KB** | Pass-Through (No Inspect) | 0.000 µs | - | Baseline |
-| 100 KB | Inbound Scan (Clean) | **249.4 µs** | **391.6 MB/s** | +249.4 µs |
-| 100 KB | Inbound Scan (Attack Hit) | **240.5 µs** | - | +240.5 µs |
+| 100 KB | Inbound Scan (Clean) | **209.7 µs** | **465.7 MB/s** | +209.7 µs |
+| 100 KB | Inbound Scan (Attack Hit) | **226.4 µs** | - | +226.4 µs |
 | **1 MB** | Pass-Through (No Inspect) | 0.001 µs | - | Baseline |
-| 1 MB | Inbound Scan (Clean) | **3212.1 µs** (3.21 ms) | **311.3 MB/s** | +3.21 ms |
-| 1 MB | Inbound Scan (Attack Hit) | **2242.3 µs** (2.24 ms) | - | +2.24 ms |
+| 1 MB | Inbound Scan (Clean) | **2243.9 µs** (2.24 ms) | **445.6 MB/s** | +2.24 ms |
+| 1 MB | Inbound Scan (Attack Hit) | **2196.1 µs** (2.20 ms) | - | +2.20 ms |
 
 ---
 
 ## 5. Architectural Insights & Honest Guardrail Boundaries
 
-1. **High Precision on Standard Injections:** Within standard English phrasing and structured delimiters, the DFA RegexSet engine achieves **100% precision and >98% recall** with zero false alarms on security blog posts and technical documentation.
+1. **Detection Performance:** Across the balanced 600-sample corpus, the DFA RegexSet engine achieves **78.3%–79.2% precision** and **60.0%–63.3% recall** (with Tier 2 structural hiding reaching 77.8%–82.2% recall). The 16.7% false positive rate is driven by defensive security articles quoting injection phrases.
 2. **Honest Limitations of Heuristic Filters:** As shown by the **74.3% bypass rate** on the held-out adaptive set, deterministic regex filters alone cannot counter semantic paraphrasing, multilingual instructions, or encoded payloads.
-3. **Defense-in-Depth Recommendation:** Inbound regex filtering is extremely fast (> 600 MB/s, < 1.6 ms for 1 MB), making it ideal as a low-cost, zero-GPU first line of defense. High-risk environments should combine this proxy layer with a small classification model or an LLM judge for second-tier semantic analysis.
+3. **Defense-in-Depth Recommendation:** Inbound regex filtering operates at line rate (395–475 MB/s, ~2.2 ms for 1 MB), making it an efficient, zero-GPU Tier 0 filter. High-risk environments should combine this proxy layer with a small classification model or an LLM judge for second-tier semantic analysis.
 
 ### Reproduction Command
 ```bash

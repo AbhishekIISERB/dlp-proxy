@@ -210,6 +210,17 @@ fn main() {
     println!("  F1 Score:  {:.1}%", dev_metrics.f1() * 100.0);
     println!("  FPR:       {:.1}%", dev_metrics.fpr() * 100.0);
 
+    for &tier in &[1, 2, 3] {
+        let tot = dev_metrics.tier_total.get(&tier).copied().unwrap_or(0);
+        let tp = dev_metrics.tier_tp.get(&tier).copied().unwrap_or(0);
+        let rec = if tot > 0 {
+            (tp as f64) / (tot as f64) * 100.0
+        } else {
+            0.0
+        };
+        println!("    Tier {tier} Recall: {tp}/{tot} ({rec:.1}%)");
+    }
+
     println!("\n=== Held-Out Test Split Performance ===");
     println!("  Total Samples: {}", test_metrics.total);
     println!(
@@ -379,21 +390,34 @@ fn generate_markdown_report(
     )
     .unwrap();
 
-    writeln!(file, "\n### Per-Tier Detection Recall (Held-Out Test Set)").unwrap();
     writeln!(
         file,
-        "\n| Tier | Description | Attack Samples | Detected | Recall |"
+        "\n### Per-Tier Detection Recall (Dev vs. Held-Out Test)"
     )
     .unwrap();
-    writeln!(file, "| :--- | :--- | :--- | :--- | :--- |").unwrap();
+    writeln!(
+        file,
+        "\n| Tier | Description | Dev Recall (TP/Total) | Held-Out Test Recall (TP/Total) |"
+    )
+    .unwrap();
+    writeln!(file, "| :--- | :--- | :--- | :--- |").unwrap();
     for &t in &[1, 2, 3] {
-        let tot = test.tier_total.get(&t).copied().unwrap_or(0);
-        let tp = test.tier_tp.get(&t).copied().unwrap_or(0);
-        let rec = if tot > 0 {
-            (tp as f64) / (tot as f64) * 100.0
+        let dev_tot = dev.tier_total.get(&t).copied().unwrap_or(0);
+        let dev_tp = dev.tier_tp.get(&t).copied().unwrap_or(0);
+        let dev_rec = if dev_tot > 0 {
+            (dev_tp as f64) / (dev_tot as f64) * 100.0
         } else {
             0.0
         };
+
+        let test_tot = test.tier_total.get(&t).copied().unwrap_or(0);
+        let test_tp = test.tier_tp.get(&t).copied().unwrap_or(0);
+        let test_rec = if test_tot > 0 {
+            (test_tp as f64) / (test_tot as f64) * 100.0
+        } else {
+            0.0
+        };
+
         let desc = match t {
             1 => "Instruction Override, Role Switch, Markers, Concealment",
             2 => "HTML Hidden Styles, Comments, Aria-Hidden, Zero-Width",
@@ -402,8 +426,8 @@ fn generate_markdown_report(
         };
         writeln!(
             file,
-            "| **Tier {}** | {} | {} | {} | **{:.1}%** |",
-            t, desc, tot, tp, rec
+            "| **Tier {}** | {} | {} / {} (**{:.1}%**) | {} / {} (**{:.1}%**) |",
+            t, desc, dev_tp, dev_tot, dev_rec, test_tp, test_tot, test_rec
         )
         .unwrap();
     }
@@ -535,9 +559,9 @@ fn generate_markdown_report(
         "\n## 5. Architectural Insights & Honest Guardrail Boundaries"
     )
     .unwrap();
-    writeln!(file, "\n1. **High Precision on Standard Injections:** Within standard English phrasing and structured delimiters, the DFA RegexSet engine achieves **100% precision and >98% recall** with zero false alarms on security blog posts and technical documentation.").unwrap();
+    writeln!(file, "\n1. **Detection Performance:** Across the balanced 600-sample corpus, the DFA RegexSet engine achieves **78.3%–79.2% precision** and **60.0%–63.3% recall** (with Tier 2 structural hiding reaching 77.8%–82.2% recall). The 16.7% false positive rate is driven by defensive security articles quoting injection phrases.").unwrap();
     writeln!(file, "2. **Honest Limitations of Heuristic Filters:** As shown by the **{:.1}% bypass rate** on the held-out adaptive set, deterministic regex filters alone cannot counter semantic paraphrasing, multilingual instructions, or encoded payloads.", bypass_rate).unwrap();
-    writeln!(file, "3. **Defense-in-Depth Recommendation:** Inbound regex filtering is extremely fast (> 600 MB/s, < 1.6 ms for 1 MB), making it ideal as a low-cost, zero-GPU first line of defense. High-risk environments should combine this proxy layer with a small classification model or an LLM judge for second-tier semantic analysis.").unwrap();
+    writeln!(file, "3. **Defense-in-Depth Recommendation:** Inbound regex filtering operates at line rate (395–475 MB/s, ~2.2 ms for 1 MB), making it an efficient, zero-GPU Tier 0 filter. High-risk environments should combine this proxy layer with a small classification model or an LLM judge for second-tier semantic analysis.").unwrap();
     writeln!(
         file,
         "\n### Reproduction Command\n```bash\ncargo run --release --example eval_injection\n```"

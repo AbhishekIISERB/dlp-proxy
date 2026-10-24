@@ -34,7 +34,7 @@
 ### Phase 5: Streaming Inspection (`stream.rs`)
 - **P5.1**: Implemented `src/stream.rs` (100 lines) with `StreamScanner`, sliding-window tail buffer (`MAX_MATCH_LEN = 256`), rolling size-cap enforcement, and multi-byte UTF-8 boundary handling.
 - **P5.2**: Created property test suite `tests/stream.rs` verifying rolling size cap abort, multi-byte UTF-8 split assembly, invalid UTF-8 fail-closed, and exhaustive byte-by-byte boundary split property tests across all 13 DLP and injection rules.
-- **P5.3**: Benchmarked streaming vs buffered inspection in `bench/stream_bench.rs` and documented results in `bench/STREAMING.md`: streaming reduces TTFB by 12.7x–60.4x (2.18 ms down to 36.1 µs on 1 MB payloads) while sustaining >430 MB/s scanning throughput.
+- **P5.3**: Benchmarked streaming vs buffered inspection in `bench/stream_bench.rs` and documented results in `bench/STREAMING.md`: in-process streaming microbenchmark processes first chunk in 9.3 µs (16 KB) to 36.1 µs (1 MB) vs full-body scan 206 µs (16 KB) to 2,177 µs (1 MB) (12.7x–60.4x initial latency reduction) while sustaining 395–475 MB/s scanning throughput in release profile. In block/sanitize modes, full-body hold-back is enforced.
 
 ---
 
@@ -48,19 +48,21 @@
 ---
 
 ### Phase 7: Documentation & Write-up
-- **P7.1**: Updated `README.md` with full ASCII bidirectional architecture diagram, `rules.toml` configuration guide, Ponytail code line budget table (1,093 lines), 9 shortcut ledger items, empirical evaluation summaries, and 5 high-impact resume bullets.
+- **P7.1**: Updated `README.md` with full ASCII bidirectional architecture diagram, `rules.toml` configuration guide, Ponytail code line budget table (1,103 lines), shortcut ledger items, empirical evaluation summaries, and 5 high-impact resume bullets.
 - **P7.2**: Created `LIMITATIONS.md` providing in-depth analysis of heuristic regex boundaries (paraphrasing, multilingual, encodings), non-HTTP channels, binary steganography, and the streaming forwarding trade-off.
 - **P7.3**: Authored `WRITEUP.md` executive engineering write-up synthesizing threat model, design, streaming optimizations, held-out evaluation results, and defense-in-depth recommendations.
 
 ---
 
-### Phase 8 (Stretch): Wildcard Domain Matching & Hardening
-- **P8.1**: Implemented zero-allocation wildcard domain matching (`*.example.com`) in `src/policy.rs` with exact-match precedence, apex domain support, and suffix collision prevention; added table-driven test suite in `tests/detect.rs`.
+### Phase 8: Hardening & Domain Routing Extensions
+- **P8.3**: Implemented zero-allocation wildcard domain matching (`*.example.com`) in `src/policy.rs` (145 lines, budget 150) with exact-match precedence, apex domain support, and suffix collision prevention; added table-driven test suite in `tests/detect.rs`.
 
 ---
 
-## In Progress
-- *All planned phases (Phase 0 through Phase 8) are fully completed, tested, and documented.*
+## Skipped / Future Roadmap
+- **P6.6: End-to-End Agent Evaluation**: Skipped / Optional (verified at unit, integration proxy, and 600-sample corpus evaluation layers; full autonomous agent harness omitted to prioritize core deterministic guarantees).
+- **P8.1: On-Device ML Classifier**: Skipped / Stretch (planned zero-GPU heuristic defense intentionally prioritized linear-time DFA scanning; neural classification deferred to downstream semantic judge).
+- **P8.2: Config Hot-Reloading**: Skipped / Stretch (`notify` crate file watcher deferred; configuration loaded cleanly on startup).
 
 ---
 
@@ -75,4 +77,4 @@
 - **Backward Compatibility:** All existing `rules.toml` files and existing outbound tests must continue to pass unchanged. New config fields default to existing outbound-only behavior (`direction = "out"`, `trust = "trusted"`, `inbound_action = "log"`).
 - **Linear-Time Matching:** Only the `regex` crate DFA/NFA linear engines will be used for detection (no backtracking, ReDoS-safe).
 - **Ponytail Discipline:** Adhere to line budgets and record all shortcuts with upgrade paths in code and the README ledger.
-- **Streaming Forwarding Trade-off:** Inbound streaming inspection enables real-time forwarding under `inbound_action = "log"` (reducing TTFB to 9–36 µs); `block` and `sanitize` require hold-back buffering up to `size_cap` because dispatched HTTP bytes cannot be recalled or sanitized once sent.
+- **Streaming Forwarding Trade-off:** Inbound streaming inspection enables real-time forwarding under `inbound_action = "log"` (reducing in-process initial chunk latency to 9–36 µs); `block` and `sanitize` require hold-back buffering up to `size_cap` because dispatched HTTP bytes cannot be recalled or sanitized once sent.
