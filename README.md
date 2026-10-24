@@ -1,6 +1,40 @@
-# DLP Proxy
+# Two-Way LLM-Agent Guardrail: DLP & Prompt Injection Proxy
 
-A lightweight, TLS-intercepting HTTP Data Loss Prevention (DLP) proxy written in Rust on top of [hudsucker](https://github.com/omjadas/hudsucker) and Tokio. It enforces per-domain policies and inspects outbound HTTP request bodies for sensitive data (API keys, credit card numbers, emails, and high-entropy secrets) to block or redact them before they leave your machine.
+A high-performance, TLS-intercepting HTTP guardrail written in Rust on top of [hudsucker](https://github.com/omjadas/hudsucker) and Tokio. It operates as a bidirectional security proxy for autonomous LLM agents:
+1. **Outbound Data Loss Prevention (DLP):** Inspects agent requests for sensitive credentials (AWS keys, credit cards, emails, and high-entropy API tokens) to block or redact them before external egress. Role-aware parser handles OpenAI and Anthropic chat message structures.
+2. **Inbound Indirect Prompt Injection Defense:** Inspects third-party web content and tool execution outputs across a 3-tier heuristic defense (instruction overrides, hidden HTML/comments/zero-width characters, and exfiltration URLs) to block or sanitize malicious directives before they enter the agent's context window.
+3. **Low-Latency Streaming Scanner:** Sliding-window streaming scanner with multi-byte UTF-8 boundary handling, reducing Time-To-First-Byte (TTFB) by **12.7x–60.4x** (down to 36 µs on 1 MB streams) while sustaining **> 450 MB/s** throughput.
+
+---
+
+## Architecture & Data Flow
+
+```
+                                      OUTBOUND FLOW (Agent Egress)
+  +------------------+                 +-------------------------------+                 +------------------+
+  |                  |   POST /chat    |          DLP PROXY            |  HTTPS Request  |                  |
+  |    LLM Agent     | --------------> | 1. Client TLS Termination     | --------------> | Upstream LLM API |
+  | (e.g. LangChain, |                 | 2. LLM-API Role Parser        |                 | (OpenAI / Anth.) |
+  |  AutoGPT, etc.)  | <-------------- |    - User/Assist: DLP scan    | <-------------- |                  |
+  +------------------+   HTTP 200/403  |    - Tool Results: Inj. scan  |  HTTPS Response +------------------+
+                                       | 3. Action: Block / Redact     |
+                                       +-------------------------------+
+                                                       |
+                                      INBOUND FLOW (Web & Tool Ingest)
+                                                       v
+  +------------------+                 +-------------------------------+                 +------------------+
+  |                  |   Clean / San.  |          DLP PROXY            |  HTTP Fetch     |                  |
+  |    LLM Agent     | <-------------- | 1. Decompress (gzip/brotli)   | <-------------- | Third-Party Web  |
+  |  Context Window  |   Content       | 2. Content-Type Gate          |                 | & Tool Endpoints |
+  |                  |                 | 3. 3-Tier Injection Detector  |                 | (Untrusted Web)  |
+  +------------------+                 | 4. Action: Block/Sanitize/Log |                 +------------------+
+                                       +-------------------------------+
+```
+
+### Inbound 3-Tier Injection Defense Hierarchy
+- **Tier 1 (Instruction Overrides & Role Switching):** Catches direct imperative directives (`ignore previous instructions`, `you are now a root shell`, `from now on...`), fake system delimiters (`<system>`, `[INST]`, `<|im_start|>`), and concealment directives (`never tell the user`).
+- **Tier 2 (Evasion & Concealment Mechanics):** Detects content hidden from human viewers but visible to tokenizers: CSS hidden styling (`style="display:none"`, `visibility:hidden`, `font-size:0px`), HTML comments (`<!-- ignore ... -->`), `aria-hidden="true"`, and invisible Unicode zero-width/bidi markers (`\u{200B}`, `\u{FEFF}`).
+- **Tier 3 (Exfiltration Channels):** Detects markdown image embeds (`![leak](http://...)`) and URL query parameters containing high-entropy tokens or long encoded data intended to exfiltrate context silently.
 
 ---
 
@@ -11,137 +45,163 @@ A lightweight, TLS-intercepting HTTP Data Loss Prevention (DLP) proxy written in
 - OpenSSL (for generating the local CA)
 
 ### 2. Generate the Local Root CA
-The proxy signs intercepted HTTPS certificates on the fly using your local Root CA. Generate a private key and self-signed certificate:
-
+The proxy signs intercepted HTTPS certificates on the fly using your local Root CA:
 ```bash
-openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 365 -subj "/CN=DLP Proxy CA"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.pem -days 365 -subj "/CN=LLM Guardrail Proxy CA"
 ```
+> **Security Invariant:** `ca.key` is automatically ignored in `.gitignore`. Upstream TLS certificates are strictly validated against webpki roots—the proxy never disables upstream verification.
 
-> **Security Note:** `ca.key` is automatically ignored in `.gitignore`. Never commit or share your private key.
-
-### 3. Build & Run the Proxy
+### 3. Build & Run
 ```bash
 cargo run --release
 ```
 The proxy starts on `http://127.0.0.1:3000`.
 
-### 4. Send Requests Through the Proxy
+### 4. Verification
 
-**Test Redaction (Credit Card):**
+**Outbound DLP Test (Credit Card Redaction):**
 ```bash
 curl --proxy http://127.0.0.1:3000 --cacert ca.pem -X POST https://httpbin.org/post \
   -H "Content-Type: text/plain" \
-  -d "Paying with card 4111 1111 1111 1111"
+  -d "Billing card: 4111 1111 1111 1111"
 ```
-The upstream server receives: `"Paying with card [REDACTED]"`.
+*Server receives:* `"Billing card: [REDACTED]"`.
 
-**Test Blocking (AWS Access Key):**
+**Inbound Prompt Injection Test (Blocking):**
 ```bash
-curl --proxy http://127.0.0.1:3000 --cacert ca.pem -X POST https://httpbin.org/post \
-  -H "Content-Type: text/plain" \
-  -d "My key is AKIAIOSFODNN7EXAMPLE"
+curl --proxy http://127.0.0.1:3000 --cacert ca.pem -X GET https://httpbin.org/base64/UGxlYXNlIGlnbm9yZSBhbGwgcHJldmlvdXMgaW5zdHJ1Y3Rpb25z
 ```
-Returns `403 Forbidden: Blocked by DLP Proxy`.
+*Returns:* `403 Forbidden: Inbound content blocked by injection policy`.
 
 ---
 
-## Request Path & Architecture
+## Configuration (`rules.toml`)
 
-1. **Client TLS Termination:** Client establishes an HTTPS connection through the proxy. Hudsucker completes the client TLS handshake using a dynamic certificate minted by `RcgenAuthority` from your local CA.
-2. **Domain Policy (`policy.rs`):** The handler extracts the request host and checks `rules.toml`.
-   - `block`: Immediately aborts with a 403 Forbidden response.
-   - `allow`: Forwards directly to upstream untouched.
-   - `inspect`: Continues to inspection stage.
-3. **Body Ingestion & Decompression:** The body is size-checked against `max_body_bytes` and decompressed using Hudsucker's streaming decoder if compressed (gzip, deflate, brotli, zstd).
-4. **Pattern & Secret Detection (`detect.rs`):**
-   - **RegexSet Pre-filtering:** Single-pass multi-pattern DFA match before position extraction.
-   - **Luhn Algorithm & BIN Filter:** Validates candidate digit sequences for card IIN prefixes (3–6) and checksum compliance.
-   - **Shannon Entropy Check:** Computes bits-per-character entropy on candidate tokens using a stack-allocated zero-allocation frequency array, filtering UUID and pure-hex formats.
-5. **Action Enforcement:**
-   - **Block:** Halts request and responds with 403.
-   - **Redact:** Non-overlapping hits are redacted from back to front to preserve byte indices; `Content-Length` is updated.
-   - **Log:** Allows the request through and records match IDs.
-6. **Audit Logging (`log.rs`):** Emits one structured JSON line per decision containing host, path, rule IDs, and action—**never logging matched sensitive text or raw payload bodies**.
-7. **Upstream Forwarding:** Intercepted requests are forwarded upstream over TLS with **strict upstream certificate verification enabled**.
+```toml
+[policy]
+default_action = "inspect"
+default_inbound_action = "sanitize" # "block", "sanitize", or "log"
+max_body_bytes = 1048576            # 1 MB size cap (fails closed if exceeded)
 
----
+# Outbound rules (API keys, cards, emails, tokens)
+[[rules]]
+id = "aws-access-key"
+pattern = 'AKIA[0-9A-Z]{16}'
+action = "block"
 
-## Guardrails & Security Model
+[[rules]]
+id = "card"
+pattern = '\b(?:\d[ -]?){13,19}\b'
+check = "luhn"
+action = "redact"
 
-- **Upstream Certificate Verification Stays On:** Upstream TLS certificates are verified against standard webpki roots. The proxy will not forward traffic to invalid or MITM'd upstreams.
-- **Fail Closed:** Any inspection failure, decode failure, or payload exceeding `max_body_bytes` results in a 403 block.
-- **Linear-Time Detection:** Powered by Rust's `regex` engine (guaranteed linear runtime, immune to ReDoS attacks).
-- **Log Decisions, Not Data:** Sensitive tokens are never written to stdout, logs, or disk.
+# Per-domain policies with direction and trust configuration
+[[policy.domains]]
+domain = "api.openai.com"
+action = "inspect"
+direction = "both"                  # Inspect outbound prompts & inbound tool results
+trust = "semi_trusted"
+
+[[policy.domains]]
+domain = "untrusted-fetch.internal"
+action = "inspect"
+direction = "in"
+trust = "untrusted"                 # Runs all Tier 1, 2, and 3 injection checks
+inbound_action = "block"            # Block immediately on detection
+```
 
 ---
 
 ## Code Budget & Shortcut Ledger
 
-The core codebase is held strictly under the architecture budget using the **Ponytail rule ladder**:
+The core codebase is held strictly under an architectural line budget using the **Ponytail rule ladder**:
 
 | File | Job | Line Budget | Actual Lines |
 | :--- | :--- | :--- | :--- |
-| `main.rs` | Load CA, config, start proxy | 60 | 53 |
-| `config.rs` | Parse `rules.toml` | 50 | 48 |
-| `policy.rs` | Per-domain allow/block/inspect lookup | 50 | 44 |
-| `detect.rs` | RegexSet, Luhn check, zero-alloc entropy, redaction | 120 | 104 |
-| `handler.rs` | Hudsucker HTTP request handler | 120 | 115 |
-| `log.rs` | Structured JSON decision logger | 40 | 22 |
-| **Total Core Code** | | **440** | **386** |
+| `src/main.rs` | Load CA, parse config, start proxy | 60 | 59 |
+| `src/config.rs` | Parse `rules.toml` schema & inbound fields | 80 | 77 |
+| `src/policy.rs` | Domain routing, Direction & Trust policy | 140 | 135 |
+| `src/detect.rs` | Outbound DLP (RegexSet, Luhn, stack entropy) | 160 | 152 |
+| `src/inject.rs` | 3-tier inbound injection detector & sanitizer | 140 | 134 |
+| `src/handler.rs` | Hudsucker request/response hook & stream router | 320 | 316 |
+| `src/llm.rs` | OpenAI / Anthropic chat message role extractor | 90 | 72 |
+| `src/stream.rs` | Sliding-window streaming scanner (256B overlap) | 100 | 100 |
+| `src/log.rs` | Structured JSON audit decision logger | 40 | 40 |
+| `src/lib.rs` | Module exports | 10 | 8 |
+| **Total Core Code** | | **1,140** | **1,093** |
 
 ### Shortcut Ledger (`grep -rn "ponytail:" src/`)
 
-1. `src/policy.rs:39`: Exact host match only.  
-   *Upgrade path:* Support wildcard globbing and suffix matching (e.g. `*.example.com`).
-2. `src/handler.rs:59`: Reads body into memory up to size cap.  
-   *Upgrade path:* Stream inspection with sliding window and rolling size cap.
-3. `src/handler.rs:73`: Text bodies only.  
-   *Upgrade path:* Support multipart/form-data and binary format decoders.
-4. `src/config.rs:44`: Reads config from disk on startup.  
-   *Upgrade path:* Config hot-reloading with `notify`.
-5. `src/detect.rs:49`: RegexSet pre-filters rules before exact position extraction.  
-   *Upgrade path:* Aho-Corasick literal pre-filtering for fixed prefixes (`AKIA`, `sk_live_`).
+All intentional shortcuts are tagged in code with explicit upgrade paths:
+1. `src/policy.rs:130`: Exact host match only.  
+   *Upgrade path:* Support wildcard globs (`*.openai.com`) and suffix matching.
+2. `src/handler.rs:94`: In-memory body buffering up to size cap for blocking/sanitization.  
+   *Upgrade path:* Hold-back sliding buffer for chunked HTTP responses.
+3. `src/handler.rs:104, 226`: Text, JSON, and XML bodies inspected; binary media skipped with audit log.  
+   *Upgrade path:* Multipart parser and OCR/steganography extraction for images.
+4. `src/config.rs:73`: Reads config from disk on startup.  
+   *Upgrade path:* Hot-reloading with file watcher (`notify` crate).
+5. `src/detect.rs:66`: RegexSet pre-filters before position extraction.  
+   *Upgrade path:* Aho-Corasick literal pre-filtering for fixed tokens (`AKIA`, `sk_live_`).
+6. `src/inject.rs:27`: Heuristic regex for hidden HTML elements.  
+   *Upgrade path:* Full streaming HTML DOM tokenizer via `lol_html`.
+7. `src/llm.rs:10`: Lightweight JSON extraction for OpenAI and Anthropic schemas.  
+   *Upgrade path:* Streaming JSON AST visitor for streaming chat completions.
+8. `src/stream.rs:35`: Sliding window tail buffer across chunk boundaries.  
+   *Upgrade path:* Streaming multi-pattern Aho-Corasick automaton.
 
 ---
 
-## Benchmark & Quality Summary
+## Evaluation & Empirical Benchmarks
 
-Measured on **Apple M1 (arm64)** running **macOS** with **rustc 1.94.1**:
+### 1. Inbound Prompt Injection Evaluation (Held-Out Test Set)
+Evaluated across **600 partitioned samples** (50% attack, 50% benign) using `cargo run --release --example eval_injection`:
 
-### 1. Adversarial Detection Quality (500-Sample Labelled Corpus)
-- **AWS Keys:** 100.0% Precision, 100.0% Recall
-- **Emails:** 100.0% Precision, 100.0% Recall
-- **Credit Cards:** **97.1% Precision**, **100.0% Recall** (with major network BIN filtering + Luhn verification; raw Luhn yields 94.3% precision as ~10% of arbitrary 16-digit order numbers collide by chance).
-- **High-Entropy Tokens:** **50.0% Precision**, **100.0% Recall** (pure-hex hashes and UUIDs excluded; non-hex base64 and JWT segments account for remaining look-alikes, confirming why this rule is scoped to audit logging).
-- *(Run `cargo run --example evaluate`)*
+| Metric | Dev Split (300) | Held-Out Test Split (300) | Description |
+| :--- | :--- | :--- | :--- |
+| **Precision** | **78.3%** | **79.2%** | High precision on standard phrasing; FPs from security articles discussing attacks |
+| **Recall** | **60.0%** | **63.3%** | Overall recall across all 3 tiers |
+| **F1 Score** | **67.9%** | **70.4%** | Harmonic mean of precision and recall |
+| **False Positive Rate** | **16.7%** | **16.7%** | Zero false alarms on standard web pages; trips on defensive quote samples |
+| **Tier 1 Recall** | 56.0% | **56.0%** | Direct overrides, system markers, and concealment |
+| **Tier 2 Recall** | 82.2% | **82.2%** | Hidden CSS styling, HTML comments, aria-hidden, zero-width |
+| **Tier 3 Recall** | 53.3% | **53.3%** | Markdown exfiltration images and token leakage URLs |
 
-### 2. Certificate Resolution Latency (Cold vs. Warm)
-Measured using Hudsucker's `RcgenAuthority` (`hudsucker/src/certificate_authority/rcgen_authority.rs:48, 65-68`):
-- **Cold Resolution (RSA-2048 CA, Ephemeral Keygen + X.509 Minting):** **2.19 ms**
-- **Warm Resolution (In-Memory Moka Cache Hit, 1,000 capacity, 300s TTL):** **0.0003 ms** (0.3 µs)
-- **Resolution Speedup:** **7,499x**
+### 2. Adaptive Attacker Evasion Matrix (Held-Out Adversarial Set)
+Evaluated on **35 held-out evasion techniques** without post-hoc rule tuning (`bench/INJECTION_RESULTS.md`):
+- **Overall Evasion Bypass Rate:** **74.3%** (26 of 35 attacks bypassed regex rules).
+- **Paraphrasing & Multilingual:** 100% bypass rate against semantic synonyms and non-English instructions (Spanish, French, German, Russian, Chinese, Japanese).
+- **Encoding Obfuscation:** 100% bypass rate on Base64, Rot13, and Hex streams.
+- **Structural Obfuscation:** Partial defense (whitespace and table splitting detected; homoglyphs bypassed).
+- *Takeaway:* Documents the honest boundary of regex heuristics; ideal as a low-overhead, zero-GPU first line of defense combined with a downstream semantic judge.
 
-### 3. Forward HTTP Proxy Throughput (7-Trial Keep-Alive Benchmark)
-- **100 KB Payload @ Concurrency 16:** **1,122.6 req/s** (p50: 11.11 ms, p99: 27.25 ms) vs. pass-through proxy **1,196.8 req/s** (**93.8% throughput retention**).
-- **1 MB Payload @ Concurrency 16:** **663.3 req/s** (p50: 23.51 ms, p99: 40.72 ms) vs. pass-through proxy **820.5 req/s** (**80.8% throughput retention**; 3.9x faster than unoptimized baseline).
-- **Zero Errors:** 100% of responses returned HTTP 200 OK across all payload and concurrency tiers.
-- *(Full matrix available in `bench/RESULTS.md` via `cargo run --release --example benchmark`)*
+### 3. Streaming TTFB & Inbound Scan Performance
+- **Time-To-First-Byte (TTFB):**
+  - 16 KB: Buffered 206 µs vs. Streaming 9.3 µs (**22.2x lower initial latency**).
+  - 1 MB: Buffered 2.18 ms vs. Streaming 36.1 µs (**60.4x lower initial latency**).
+- **Scan Throughput:** Sustained at **440–475 MB/s** in release profile.
+- **Boundary Property Test:** Verified 100% detection rate across every single byte split offset across chunk boundaries (`tests/stream.rs`).
+
+### 4. Outbound DLP & Dynamic CA Performance
+- **Adversarial DLP Corpus (500 samples):** 100% recall on AWS keys, emails, cards, and entropy tokens; **97.1% card precision** with BIN prefix validation + Luhn checksum.
+- **Dynamic CA Minting:** **2.19 ms cold** vs. **0.3 µs cached** using Hudsucker's Moka cache (**7,499x speedup**).
+- **Forward Proxy Throughput:** **1,122 req/s** @ 100 KB, **663 req/s** @ 1 MB (concurrency 16), retaining 81%–94% of raw proxy throughput.
+
+---
+
+## Security Invariants
+
+1. **Fail Closed:** Every parse error, invalid UTF-8 sequence, decompress failure, and payload exceeding `max_body_bytes` terminates with a 403 Block response.
+2. **Log Decisions, Not Data:** Structured JSON logs record decision metadata (`host`, `path`, `action`, `rules`, `direction`), never matched tokens, card numbers, or injection text.
+3. **Upstream TLS Stays On:** Upstream TLS certificates are verified against standard webpki roots. The proxy will not forward traffic to invalid upstreams.
+4. **Linear Time Matching:** Powered strictly by Rust's `regex` DFA/NFA engine (guaranteed $O(N)$ execution, mathematically immune to ReDoS catastrophic backtracking).
 
 ---
 
 ## Resume Bullets
 
-- *Built a TLS-intercepting HTTP proxy in Rust on hudsucker and Tokio, with per-domain policy and regex, Luhn and entropy detection that blocks or redacts sensitive request data.*
-- *Evaluated on a 500-sample synthetic corpus including 250 adversarial look-alikes: achieved 100% recall on AWS keys, emails, and cards; card rule 97.1% precision with BIN filtering (raw 16-digit order IDs pass Luhn ~10% of the time); entropy rule 50.0% precision, scoped to audit-only logging.*
-- *Measured dynamic CA cert resolution at 2.19 ms cold vs. 0.3 µs cached using Hudsucker’s 1,000-capacity Moka cache. Optimized scanning with RegexSet and stack arrays, achieving 663 req/s at 1 MB / 16 connections (80.8% of pass-through proxy throughput).*
-- *Held the codebase to 386 lines using a Ponytail rule ladder, documenting all shortcuts with explicit upgrade paths, and verified with table-driven and end-to-end integration tests.*
-
----
-
-## Sources & References
-
-1. **Hudsucker Proxy**: [github.com/omjadas/hudsucker](https://github.com/omjadas/hudsucker) (v0.25.0)
-   - `RcgenAuthority` Moka cache: `hudsucker/src/certificate_authority/rcgen_authority.rs` line 48 (`cache: Cache<Authority, Arc<ServerConfig>>`) and lines 65–68 (`Cache::builder().max_capacity(cache_size).time_to_live(...)`).
-   - Cache TTL constant: `hudsucker/src/certificate_authority/mod.rs` line 12 (`CACHE_TTL: u64 = 300`).
-2. **ISO/IEC 7812-1**: Identification cards — Identification of issuers (Numbering system and Luhn checksum algorithm).
-3. **Shannon Entropy**: Claude Shannon, *A Mathematical Theory of Communication* (Bell System Technical Journal, 1948).
+- *Engineered a two-way TLS-intercepting LLM-agent security proxy in Rust using Hudsucker and Tokio, providing outbound DLP redaction and inbound 3-tier indirect prompt injection defense.*
+- *Implemented a zero-GPU 3-tier injection detector (instruction overrides, hidden CSS/HTML/zero-width characters, and exfiltration URLs) operating at > 450 MB/s sustained throughput with 2.1 ms latency on 1 MB payloads.*
+- *Architected a sliding-window streaming scanner with multi-byte UTF-8 boundary safety, reducing Time-To-First-Byte (TTFB) by 60.4x (2.18 ms down to 36 µs) on 1 MB payloads with exhaustive byte-by-byte boundary property testing.*
+- *Conducted rigorous held-out adversarial evaluations across 600 dev/test samples and a 35-sample adaptive attack evasion set; honestly benchmarked the boundary of regex heuristics (74.3% evasion bypass rate on paraphrasing/multilingual attacks) to define defense-in-depth requirements.*
+- *Maintained strict engineering discipline: 1,093 total lines under Ponytail line budgets, zero compiler warnings on `-D warnings`, zero sensitive data logged, and 29 automated table-driven and end-to-end integration tests.*
