@@ -25,10 +25,16 @@
 - **P3.4**: Extended `src/log.rs` with `direction` field (`"in"`/`"out"`), omitting the field on outbound logs for strict backward compatibility.
 - **P3.5**: Created integration tests in `tests/inbound_proxy.rs` verifying all three inbound actions against a local mock upstream, including gzip decompression, benign pass-through, and fail-closed oversized body protection.
 
+### Phase 4: LLM-API Awareness (`llm.rs`)
+- **P4.1**: Implemented `src/llm.rs` with `parse_chat_messages(json_str)` extracting `(role, text, is_tool_result)` for OpenAI and Anthropic message formats, with graceful raw-body fallback on non-chat or malformed JSON.
+- **P4.2**: Wired per-role inspection in `src/handler.rs`: DLP rules inspect all roles, while inbound injection scanner specifically inspects tool-result content inside outbound requests.
+- **P4.3**: Structured audit logging records the triggered role name (`block:user`, `block:tool`, `redact:assistant`), never logging payload content.
+- **P4.4**: Created test suite in `tests/llm.rs` verifying OpenAI/Anthropic fixtures, tool-result injection blocking, user credit card DLP enforcement, and malformed JSON fallback.
+
 ---
 
 ## In Progress
-- Transitioning to **Phase 4: LLM-API awareness (`llm.rs`)**.
+- Transitioning to **Phase 5: Streaming inspection (`stream.rs`)**.
 
 ---
 
