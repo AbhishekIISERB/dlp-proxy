@@ -1,8 +1,8 @@
 use crate::{
     detect::{self, Action, Hit, Scanner},
-    inject,
+    inject, llm,
     log::log_decision_dir,
-    policy::{DomainAction, InboundAction, Policy, PolicyDecision},
+    policy::{DomainAction, InboundAction, Policy, PolicyDecision, Trust},
 };
 use http_body_util::BodyExt;
 use hudsucker::{
@@ -110,6 +110,31 @@ impl HttpHandler for DlpHandler {
             }
         };
 
+        let chat_msgs = llm::parse_chat_messages(text);
+        if let Some(ref msgs) = chat_msgs {
+            for msg in msgs {
+                if msg.is_tool_result {
+                    let inj_hits = inject::scan(&msg.text, Trust::Untrusted);
+                    if !inj_hits.is_empty() {
+                        let rule_ids: Vec<String> =
+                            inj_hits.iter().map(|h| h.rule_id.to_string()).collect();
+                        PENDING_REQUESTS.lock().unwrap().remove(&ctx.client_addr);
+                        log_decision_dir(
+                            "out",
+                            &host,
+                            &path,
+                            &format!("block:{}", msg.role),
+                            &rule_ids,
+                        );
+                        return block_response(
+                            "403 Forbidden: Blocked by DLP Proxy (Injection in Tool Result)\n",
+                        )
+                        .into();
+                    }
+                }
+            }
+        }
+
         let hits = self.scanner.scan(text);
         if hits.is_empty() {
             log_decision_dir("out", &host, &path, "allow", &[]);
@@ -120,12 +145,26 @@ impl HttpHandler for DlpHandler {
             .iter()
             .map(|h| self.scanner.rules[h.rule].id.clone())
             .collect();
+
+        let triggered_role = chat_msgs.as_ref().and_then(|msgs| {
+            msgs.iter()
+                .find(|m| !self.scanner.scan(&m.text).is_empty())
+                .map(|m| m.role.as_str())
+        });
+        let role_suffix = triggered_role.map(|r| format!(":{r}")).unwrap_or_default();
+
         if hits
             .iter()
             .any(|h| matches!(self.scanner.rules[h.rule].action, Action::Block))
         {
             PENDING_REQUESTS.lock().unwrap().remove(&ctx.client_addr);
-            log_decision_dir("out", &host, &path, "block", &rule_ids);
+            log_decision_dir(
+                "out",
+                &host,
+                &path,
+                &format!("block{role_suffix}"),
+                &rule_ids,
+            );
             return block_response("403 Forbidden: Blocked by DLP Proxy\n").into();
         }
 
@@ -142,11 +181,17 @@ impl HttpHandler for DlpHandler {
             parts
                 .headers
                 .insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
-            log_decision_dir("out", &host, &path, "redact", &rule_ids);
+            log_decision_dir(
+                "out",
+                &host,
+                &path,
+                &format!("redact{role_suffix}"),
+                &rule_ids,
+            );
             return Request::from_parts(parts, Body::from(bytes)).into();
         }
 
-        log_decision_dir("out", &host, &path, "log", &rule_ids);
+        log_decision_dir("out", &host, &path, &format!("log{role_suffix}"), &rule_ids);
         Request::from_parts(parts, Body::from(collected)).into()
     }
 
