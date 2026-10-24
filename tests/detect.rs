@@ -125,6 +125,46 @@ fn test_policy_lookup() {
 }
 
 #[test]
+fn test_policy_wildcard_matching() {
+    let domains = vec![
+        DomainEntry {
+            host: "*.example.com".into(),
+            action: "block".into(),
+            direction: "both".into(),
+            trust: "untrusted".into(),
+            inbound_action: "block".into(),
+        },
+        DomainEntry {
+            host: "special.example.com".into(),
+            action: "allow".into(),
+            direction: "out".into(),
+            trust: "trusted".into(),
+            inbound_action: "log".into(),
+        },
+    ];
+    let policy = Policy::new("inspect", &domains);
+
+    // Exact match has higher precedence over wildcard
+    assert_eq!(policy.decide("special.example.com"), DomainAction::Allow);
+    assert_eq!(
+        policy.decide("special.example.com:443"),
+        DomainAction::Allow
+    );
+
+    // Wildcard matches subdomains
+    assert_eq!(policy.decide("api.example.com"), DomainAction::Block);
+    assert_eq!(policy.decide("sub.api.example.com"), DomainAction::Block);
+
+    // Wildcard matches apex domain
+    assert_eq!(policy.decide("example.com"), DomainAction::Block);
+
+    // Suffix collision prevention: "fake-example.com" should NOT match "*.example.com"
+    assert_eq!(policy.decide("fake-example.com"), DomainAction::Inspect);
+    assert_eq!(policy.decide("notexample.com"), DomainAction::Inspect);
+    assert_eq!(policy.decide("other.com"), DomainAction::Inspect);
+}
+
+#[test]
 fn test_rules_toml_backward_compatibility() {
     let cfg = dlp_proxy::config::load_config("rules.toml").expect("Failed to parse rules.toml");
     assert_eq!(cfg.policy.default, "inspect");

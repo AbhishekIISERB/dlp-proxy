@@ -127,9 +127,19 @@ impl Policy {
         }
     }
 
-    // ponytail: exact host match only; upgrade: support wildcards and suffix matching
+    // ponytail: exact host match with wildcard suffix fallback; upgrade: full radix/trie domain matcher
     pub fn decide(&self, host: &str) -> PolicyDecision {
         let clean = host.split(':').next().unwrap_or(host).to_lowercase();
-        self.domains.get(&clean).copied().unwrap_or(self.default)
+        if let Some(&dec) = self.domains.get(&clean) {
+            return dec;
+        }
+        for (dom, &dec) in &self.domains {
+            if let Some(suffix) = dom.strip_prefix("*.")
+                && (clean == suffix || clean.strip_suffix(suffix).is_some_and(|p| p.ends_with('.')))
+            {
+                return dec;
+            }
+        }
+        self.default
     }
 }
