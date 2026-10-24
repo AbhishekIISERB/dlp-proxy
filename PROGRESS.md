@@ -12,10 +12,16 @@
 - **P1.2**: Updated `policy.rs` with `Direction`, `Trust`, `InboundAction`, and `PolicyDecision` returning per-domain settings while maintaining `DomainAction` equality.
 - **P1.3**: Added table-driven tests in `tests/detect.rs` covering TOML deserialization defaults, direction predicates, and policy lookup field combinations.
 
+### Phase 2: Inbound Injection Detector (`inject.rs`)
+- **P2.1**: Implemented `src/inject.rs` with 3-tier detection (`scan(text, trust)`) using `RegexSet` pre-filtering and position extraction. Reused zero-alloc Shannon entropy from `detect.rs`.
+- **P2.2**: Implemented `sanitize(text, hits)` for back-to-front replacement of matched spans with `[INJECTION BLOCKED]` and stripping of zero-width and bidi control characters.
+- **P2.3**: Added table-driven tests in `tests/inject.rs` with 3 positive and 3 negative test cases per rule, including adversarial look-alikes and security discussions.
+- **P2.4**: Added log regression test in `tests/inject.rs` verifying matched tokens and injection text are never emitted in structured decision logs.
+
 ---
 
 ## In Progress
-- Transitioning to **Phase 2: Inbound injection detector (`inject.rs`)**.
+- Transitioning to **Phase 3: Wire inbound inspection into the proxy**.
 
 ---
 
