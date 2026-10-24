@@ -7,10 +7,15 @@
 - **P0.2**: Established baseline measurements in `bench/BASELINE.md` for unit/integration tests (`cargo test`), detection precision/recall (`cargo run --example evaluate`), certificate authority caching latency, and forward proxy throughput.
 - **P0.3**: Initialized `PROGRESS.md` with structured sections for ongoing phase tracking.
 
+### Phase 1: Config & Policy for Inbound Inspection
+- **P1.1**: Extended `rules.toml` schema (`config.rs`) with backward-compatible `direction`, `trust`, and `inbound_action` fields.
+- **P1.2**: Updated `policy.rs` with `Direction`, `Trust`, `InboundAction`, and `PolicyDecision` returning per-domain settings while maintaining `DomainAction` equality.
+- **P1.3**: Added table-driven tests in `tests/detect.rs` covering TOML deserialization defaults, direction predicates, and policy lookup field combinations.
+
 ---
 
 ## In Progress
-- Transitioning to **Phase 1: Config and policy for inbound inspection**.
+- Transitioning to **Phase 2: Inbound injection detector (`inject.rs`)**.
 
 ---
 
